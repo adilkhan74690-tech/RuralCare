@@ -1,0 +1,102 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  passwordHash String
+  name         String
+  role         String   @default("CHW") // Community Health Worker, Supervisor, Admin
+  villageZone  String
+  phoneNumber  String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@map("users")
+}
+
+model Patient {
+  id               String     @id @default(uuid())
+  patientId        String     @unique // Fictional display ID e.g. "RC-2026-001"
+  fullName         String
+  age              Int
+  gender           String     // Female, Male, Other
+  village          String
+  contactNumber    String
+  chwAssigned      String
+  registrationDate DateTime   @default(now())
+  notes            String?
+  syncStatus       String     @default("synced") // synced, pending, failed, conflict
+  version          Int        @default(1)
+  lastModified     DateTime   @updatedAt
+  createdAt        DateTime   @default(now())
+
+  followUps        FollowUp[]
+  tasks            Task[]
+
+  @@map("patients")
+}
+
+model FollowUp {
+  id               String    @id @default(uuid())
+  patientId        String
+  patient          Patient   @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  patientDisplayId String
+  patientName      String
+  visitDate        DateTime
+  category         String    // General check-up, Maternal health follow-up, etc.
+  observations     String    // General administrative observations
+  notes            String
+  nextFollowUpDate DateTime?
+  status           String    @default("scheduled") // scheduled, completed, missed, cancelled
+  chwName          String
+  syncStatus       String    @default("synced")
+  version          Int       @default(1)
+  lastModified     DateTime  @updatedAt
+  createdAt        DateTime  @default(now())
+
+  @@map("follow_ups")
+}
+
+model Task {
+  id           String    @id @default(uuid())
+  title        String
+  patientId    String?
+  patient      Patient?  @relation(fields: [patientId], references: [id], onDelete: SetNull)
+  patientName  String?
+  dueDate      DateTime
+  priority     String    @default("medium") // low, medium, high, urgent
+  completed    Boolean   @default(false)
+  completedAt  DateTime?
+  assignedChw  String
+  category     String    // Administrative, Routine follow-up, etc.
+  syncStatus   String    @default("synced")
+  version      Int       @default(1)
+  lastModified DateTime  @updatedAt
+  createdAt    DateTime  @default(now())
+
+  @@map("tasks")
+}
+
+model SyncAuditLog {
+  id              String    @id @default(uuid())
+  entityType      String    // patient, followup, task
+  entityId        String
+  operationType   String    // CREATE, UPDATE, DELETE
+  payload         Json
+  status          String    @default("synced")
+  clientTimestamp DateTime?
+  errorMessage    String?
+  createdAt       DateTime  @default(now())
+
+  @@map("sync_audit_logs")
+}

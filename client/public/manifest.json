@@ -1,0 +1,16 @@
+{
+  "short_name": "RuralCare",
+  "name": "RuralCare Connect - CHW Offline Healthcare",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "type": "image/svg+xml",
+      "sizes": "192x192 512x512"
+    }
+  ],
+  "start_url": "/",
+  "background_color": "#F8F7F3",
+  "theme_color": "#FFC900",
+  "display": "standalone",
+  "orientation": "portrait-primary"
+}
