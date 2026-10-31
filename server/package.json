@@ -9,7 +9,9 @@
     "start": "node dist/server.js",
     "dev": "tsx watch src/server.ts",
     "test": "tsx src/tests/securityVerification.ts",
-    "prisma:deploy": "prisma migrate deploy"
+    "prisma:deploy": "prisma migrate deploy",
+    "provision:account": "tsx src/scripts/provisionAccount.ts",
+    "check:account": "tsx src/scripts/checkAccount.ts"
   },
   "dependencies": {
     "@prisma/client": "5.22.0",

@@ -75,7 +75,7 @@ app.use('/api/', apiLimiter);
 app.use((req, res, next) => {
   const start = Date.now();
   res.on('finish', () => {
-    console.log(`[API] ${req.method} ${req.baseUrl + req.path} -> ${res.statusCode} (${Date.now() - start}ms)`);
+    console.log(`[API] ${req.method} ${req.originalUrl || req.url} -> ${res.statusCode} (${Date.now() - start}ms)`);
   });
   next();
 });
@@ -699,7 +699,7 @@ export { app };
 
 // Start Express server
 const PORT = env.PORT || 5000;
-if (process.env.NODE_ENV !== 'test') {
+if (process.env.NODE_ENV !== 'test' && require.main === module) {
   app.listen(PORT, async () => {
     console.log(`🚀 RuralCare Connect Hardened API running at http://localhost:${PORT}`);
     console.log(`📡 Health Check: http://localhost:${PORT}/api/health`);

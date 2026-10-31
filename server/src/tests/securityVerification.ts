@@ -1,6 +1,9 @@
+process.env.NODE_ENV = 'test';
+
 import http from 'http';
 import { AddressInfo } from 'net';
 import jwt from 'jsonwebtoken';
+import bcrypt from 'bcryptjs';
 import { app } from '../server';
 import { env } from '../config/env';
 import { prisma } from '../prisma';
@@ -590,6 +593,97 @@ async function main() {
       const xPoweredBy = res.headers.get('x-powered-by');
       assert(xPoweredBy === null, `Expected x-powered-by header to be absent, got ${xPoweredBy}`);
     });
+
+    // -------------------------------------------------------------------------
+    // TEST SUITE 9: ADMINISTRATIVE SETUP & SECURE ACCOUNT PROVISIONING
+    // -------------------------------------------------------------------------
+    console.log('\n--- TEST SUITE 9: Administrative Setup & Account Provisioning ---');
+
+    await runTest('9.1: Public /api/admin/setup endpoint does not exist (returns 404 Not Found)', async () => {
+      const res = await fetch(`${baseUrl}/admin/setup`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: 'unauth@ruralcare.org',
+          password: 'Password@123',
+          name: 'Unauthorized Attempt',
+        }),
+      });
+      assert(res.status === 404, `Expected 404 Not Found for non-existent admin endpoint, got ${res.status}`);
+    });
+
+    const provisionEmail = `prov-${Date.now()}@ruralcare.org`;
+    const provisionPassword = 'SecureProvisioned@123';
+    const provisionPasswordHash = await bcrypt.hash(provisionPassword, 10);
+
+    await runTest('9.2: Provisioned user record is securely created with hashed password and role', async () => {
+      const created = await prisma.user.create({
+        data: {
+          email: provisionEmail,
+          passwordHash: provisionPasswordHash,
+          name: 'Priya Sharma',
+          role: 'Community Health Worker',
+          villageZone: 'Ramgarh Health Sector',
+          phoneNumber: '+91 98765 99887',
+        },
+        select: {
+          id: true,
+          email: true,
+          name: true,
+          role: true,
+          villageZone: true,
+        },
+      });
+
+      assert(created.email === provisionEmail, 'Email must match');
+      assert(created.role === 'Community Health Worker', 'Role must match Community Health Worker');
+      assert(!('passwordHash' in created), 'passwordHash must never be exposed');
+    });
+
+    await runTest('9.3: Newly provisioned account logs in successfully and returns JWT', async () => {
+      const res = await fetch(`${baseUrl}/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: provisionEmail,
+          password: provisionPassword,
+        }),
+      });
+      assert(res.status === 200, `Expected 200 OK, got ${res.status}`);
+      const body = await res.json();
+      assert(body.success === true, 'Expected success: true');
+      assert(typeof body.token === 'string' && body.token.length > 20, 'JWT token must be returned');
+      assert(body.user.email === provisionEmail, 'User profile email must match');
+      assert(body.user.role === 'Community Health Worker', 'Role must match');
+      assert(!('passwordHash' in body.user), 'Password hash must never be returned');
+    });
+
+    await runTest('9.4: Invalid credentials for provisioned account return 401', async () => {
+      const res = await fetch(`${baseUrl}/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: provisionEmail,
+          password: 'WrongPassword@999',
+        }),
+      });
+      assert(res.status === 401, `Expected 401 Unauthorized, got ${res.status}`);
+      const body = await res.json();
+      assert(body.success === false, 'Expected success: false');
+    });
+
+    await runTest('9.5: Account provisioning idempotency - existing user is detected and preserved', async () => {
+      const existing = await prisma.user.findUnique({
+        where: { email: provisionEmail },
+        select: { id: true, email: true, role: true },
+      });
+      assert(existing !== null, 'Existing account must be found');
+      assert(existing.email === provisionEmail, 'Email must match');
+    });
+
+    // Cleanup test provisioned user
+    await prisma.user.deleteMany({ where: { email: provisionEmail } });
+
 
   } finally {
     // Graceful shutdown of ephemeral server & database connection

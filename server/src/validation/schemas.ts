@@ -109,3 +109,31 @@ export const syncBatchSchema = z.object({
 export type LoginInput = z.infer<typeof loginSchema>;
 export type SyncBatchInput = z.infer<typeof syncBatchSchema>;
 export type SyncItemInput = z.infer<typeof syncItemSchema>;
+
+export const provisionUserSchema = z.object({
+  email: z
+    .string({ required_error: 'Email is required' })
+    .trim()
+    .email('Please enter a valid email address')
+    .max(255, 'Email is too long'),
+  password: z
+    .string({ required_error: 'Password is required' })
+    .min(8, 'Password must be at least 8 characters long')
+    .max(128, 'Password is too long'),
+  name: z
+    .string({ required_error: 'Name is required' })
+    .trim()
+    .min(1, 'Name cannot be empty')
+    .max(150, 'Name cannot exceed 150 characters'),
+  role: z
+    .enum(['Community Health Worker', 'Healthcare Supervisor', 'CHW', 'Supervisor', 'Admin'])
+    .default('Community Health Worker'),
+  villageZone: z
+    .string()
+    .trim()
+    .min(1, 'Village zone cannot be empty')
+    .default('General Health Sector'),
+  phoneNumber: z.string().max(35).optional().default(''),
+});
+
+export type ProvisionUserInput = z.infer<typeof provisionUserSchema>;

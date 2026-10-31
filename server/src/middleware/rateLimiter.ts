@@ -6,6 +6,7 @@ export const authLimiter = rateLimit({
   max: 10, // Limit each IP to 10 login requests per 15 minutes
   standardHeaders: true,
   legacyHeaders: false,
+  skip: () => process.env.NODE_ENV === 'test',
   message: {
     success: false,
     error: 'Too many login attempts from this IP. Please try again after 15 minutes.',
@@ -18,6 +19,7 @@ export const apiLimiter = rateLimit({
   max: 300, // 300 requests per 15 minutes
   standardHeaders: true,
   legacyHeaders: false,
+  skip: () => process.env.NODE_ENV === 'test',
   message: {
     success: false,
     error: 'Too many requests. Please slow down.',
@@ -30,6 +32,7 @@ export const syncLimiter = rateLimit({
   max: 60, // 60 sync calls per 15 minutes
   standardHeaders: true,
   legacyHeaders: false,
+  skip: () => process.env.NODE_ENV === 'test',
   message: {
     success: false,
     error: 'Too many synchronization requests. Please try again shortly.',
