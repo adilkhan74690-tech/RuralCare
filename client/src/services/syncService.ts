@@ -12,6 +12,9 @@ export interface SyncResult {
   timestamp: string;
 }
 
+// In-flight concurrency lock to prevent duplicate sync triggers
+let isSyncInProgress = false;
+
 /**
  * Checks if the device is currently in genuine online state.
  */
@@ -20,13 +23,42 @@ export function isDeviceOnline(): boolean {
 }
 
 /**
+ * Retrieve the active user's JWT from secure browser session storage.
+ */
+export function getStoredAuthToken(): string | null {
+  try {
+    const raw =
+      localStorage.getItem('ruralcare_auth_session') ||
+      sessionStorage.getItem('ruralcare_auth_session');
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return parsed?.token || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Synchronize all pending syncQueue items with the PostgreSQL backend.
  * ONLY marks records as synced after backend responds with acknowledgement of successful database persistence.
+ * Enforces server-side authentication with JWT, concurrency guard, and handles conflicts.
  */
 export async function syncPendingRecords(): Promise<SyncResult> {
   const timestamp = new Date().toISOString();
 
-  // 1. Connectivity check
+  // 1. Guard against concurrent executions
+  if (isSyncInProgress) {
+    console.log('[SyncService] A synchronization operation is already in progress. Skipping duplicate invocation.');
+    return {
+      success: false,
+      processedCount: 0,
+      failedCount: 0,
+      message: 'Sync is already in progress.',
+      timestamp,
+    };
+  }
+
+  // 2. Connectivity check
   if (!isDeviceOnline()) {
     console.log('[SyncService] Device is offline. Sync skipped; changes remain queued locally.');
     return {
@@ -38,11 +70,23 @@ export async function syncPendingRecords(): Promise<SyncResult> {
     };
   }
 
-  // 2. Fetch pending queue items from Dexie
+  // 3. Authentication check
+  const token = getStoredAuthToken();
+  if (!token) {
+    console.log('[SyncService] No active authentication session found. Preserving offline records locally.');
+    return {
+      success: false,
+      processedCount: 0,
+      failedCount: 0,
+      message: 'Please log in to upload queued records to the central health database.',
+      timestamp,
+    };
+  }
+
+  // 4. Fetch pending queue items from Dexie
   const pendingItems = await db.syncQueue.where('status').equals('pending').toArray();
 
   if (pendingItems.length === 0) {
-    console.log('[SyncService] No pending items in queue.');
     return {
       success: true,
       processedCount: 0,
@@ -52,13 +96,15 @@ export async function syncPendingRecords(): Promise<SyncResult> {
     };
   }
 
-  console.log(`[SyncService] Sending ${pendingItems.length} pending items to ${API_BASE_URL}/sync...`);
+  isSyncInProgress = true;
+  console.log(`[SyncService] Sending ${pendingItems.length} authenticated pending items to ${API_BASE_URL}/sync...`);
 
   try {
     const response = await fetch(`${API_BASE_URL}/sync`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
       },
       body: JSON.stringify({ items: pendingItems }),
     });
@@ -74,7 +120,10 @@ export async function syncPendingRecords(): Promise<SyncResult> {
           await db.syncQueue.update(item.id, {
             lastAttempt: nowStr,
             retryCount: (item.retryCount || 0) + 1,
-            errorMessage: `Server error: HTTP ${response.status}`,
+            errorMessage:
+              response.status === 401
+                ? 'Authentication required. Please re-login.'
+                : `Server error: HTTP ${response.status}`,
           });
         }
       });
@@ -83,7 +132,10 @@ export async function syncPendingRecords(): Promise<SyncResult> {
         success: false,
         processedCount: 0,
         failedCount: pendingItems.length,
-        message: `Sync failed: Server returned HTTP ${response.status}`,
+        message:
+          response.status === 401
+            ? 'Authentication expired. Your records remain safely stored on this device until you re-authenticate.'
+            : `Sync failed: Server returned HTTP ${response.status}`,
         error: errText,
         timestamp,
       };
@@ -99,7 +151,7 @@ export async function syncPendingRecords(): Promise<SyncResult> {
     const processedSet = new Set(data.processedIds || []);
     const failedMap = new Map((data.failedItems || []).map((f) => [f.id, f.error]));
 
-    // 3. Atomically update only backend-acknowledged records
+    // 5. Atomically update only backend-acknowledged records
     await db.transaction('rw', [db.syncQueue, db.patients, db.followUps, db.tasks], async () => {
       const nowTimeStr = new Date().toLocaleTimeString();
 
@@ -121,7 +173,7 @@ export async function syncPendingRecords(): Promise<SyncResult> {
             await db.tasks.update(item.entityId, { syncStatus: 'synced' });
           }
         } else if (failedMap.has(item.id)) {
-          // Backend reported an error for this record
+          // Backend reported an error/conflict for this record
           await db.syncQueue.update(item.id, {
             status: 'failed',
             lastAttempt: nowTimeStr,
@@ -138,13 +190,16 @@ export async function syncPendingRecords(): Promise<SyncResult> {
       success: true,
       processedCount: data.processedIds.length,
       failedCount: (data.failedItems || []).length,
-      message: `Synchronized ${data.processedIds.length} record(s) with PostgreSQL.`,
+      message:
+        (data.failedItems || []).length > 0
+          ? `Synchronized ${data.processedIds.length} record(s). ${data.failedItems?.length} items require review.`
+          : `Synchronized ${data.processedIds.length} record(s) with PostgreSQL.`,
       timestamp: data.syncedAt || timestamp,
     };
   } catch (netError: any) {
     console.error('[SyncService] Network error during synchronization:', netError);
 
-    // Network dropped during sync - items remain pending
+    // Network dropped during sync - items remain safely pending
     const nowStr = new Date().toLocaleTimeString();
     await db.transaction('rw', db.syncQueue, async () => {
       for (const item of pendingItems) {
@@ -164,5 +219,7 @@ export async function syncPendingRecords(): Promise<SyncResult> {
       error: netError.message,
       timestamp,
     };
+  } finally {
+    isSyncInProgress = false;
   }
 }

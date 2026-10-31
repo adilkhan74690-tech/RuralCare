@@ -14,6 +14,7 @@ import {
   ArrowLeft 
 } from 'lucide-react';
 import { Patient, FollowUp, FollowUpCategory, FollowUpStatus } from '../types';
+import { useAuth } from '../context/AuthContext';
 
 interface FollowUpManagementProps {
   patients: Patient[];
@@ -26,6 +27,7 @@ export const FollowUpManagement: React.FC<FollowUpManagementProps> = ({
   followUps,
   onAddFollowUp,
 }) => {
+  const { user } = useAuth();
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
   const preselectedPatientId = searchParams.get('patientId') || '';
@@ -82,7 +84,7 @@ export const FollowUpManagement: React.FC<FollowUpManagementProps> = ({
       notes: notes.trim(),
       nextFollowUpDate: nextFollowUpDate || undefined,
       status,
-      chwName: 'Sarah Jenkins',
+      chwName: user?.name || 'Community Health Worker',
       syncStatus: 'pending',
       version: 1,
       lastModified: new Date().toISOString(),

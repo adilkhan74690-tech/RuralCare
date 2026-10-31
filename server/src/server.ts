@@ -1,26 +1,81 @@
-import express, { Request, Response } from 'express';
+import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
+import helmet from 'helmet';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { env } from './config/env';
 import { prisma } from './prisma';
+import {
+  authenticateToken,
+  revokeToken,
+  isSupervisor,
+  AuthRequest,
+} from './middleware/auth';
+import { authLimiter, apiLimiter, syncLimiter } from './middleware/rateLimiter';
+import {
+  loginSchema,
+  syncBatchSchema,
+  patientPayloadSchema,
+  followUpPayloadSchema,
+  taskPayloadSchema,
+} from './validation/schemas';
 
 const app = express();
 
+// Disable Express fingerprinting header
+app.disable('x-powered-by');
+
+// HTTP Security Headers via Helmet
 app.use(
-  cors({
-    origin: [env.CLIENT_URL, 'http://localhost:5173', 'http://127.0.0.1:5173'],
-    credentials: true,
+  helmet({
+    contentSecurityPolicy: false, // APIs typically serve JSON; allow embedding/CORS as needed
+    crossOriginEmbedderPolicy: false,
   })
 );
 
-app.use(express.json({ limit: '10mb' }));
+// CORS configuration restricting origins strictly (in production, only configured client origin is permitted)
+const allowedOrigins =
+  env.NODE_ENV === 'production'
+    ? [env.CLIENT_URL]
+    : [env.CLIENT_URL, 'http://localhost:5173', 'http://127.0.0.1:5173'];
 
-// Request logger
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      // Allow requests with no origin (mobile apps, curl, server-to-server) or in whitelist
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error('CORS policy: Access denied for this origin.'));
+      }
+    },
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+  })
+);
+
+// Enforce HTTPS in production via reverse proxy protocol check
+if (env.NODE_ENV === 'production') {
+  app.use((req, res, next) => {
+    if (req.headers['x-forwarded-proto'] && req.headers['x-forwarded-proto'] !== 'https') {
+      return res.redirect(301, `https://${req.headers.host}${req.url}`);
+    }
+    next();
+  });
+}
+
+// Payload size limit to prevent memory exhaustion
+app.use(express.json({ limit: '2mb' }));
+
+// Apply general API rate limiting to all /api/ routes
+app.use('/api/', apiLimiter);
+
+// Minimal privacy-preserving request logger (no PII or auth headers logged)
 app.use((req, res, next) => {
   const start = Date.now();
   res.on('finish', () => {
-    console.log(`[API] ${req.method} ${req.originalUrl} -> ${res.statusCode} (${Date.now() - start}ms)`);
+    console.log(`[API] ${req.method} ${req.baseUrl + req.path} -> ${res.statusCode} (${Date.now() - start}ms)`);
   });
   next();
 });
@@ -28,11 +83,20 @@ app.use((req, res, next) => {
 // Seed default official healthcare worker accounts if table is empty
 async function ensureDefaultAccounts() {
   try {
+    // In production, automatic default accounts with hardcoded passwords are strictly disabled
+    if (env.NODE_ENV === 'production') {
+      console.log('[Auth] Production mode detected: Automatic default staff account seeding is disabled.');
+      return;
+    }
+
     const userCount = await prisma.user.count();
     if (userCount === 0) {
-      console.log('[Auth] Initializing default healthcare staff accounts in PostgreSQL...');
-      const defaultPasswordHash = bcrypt.hashSync('Password@123', 10);
-      const adminPasswordHash = bcrypt.hashSync('Admin@123', 10);
+      console.log('[Auth] Initializing default healthcare staff accounts in PostgreSQL (Development/Test Mode)...');
+      const defaultPassword = process.env.SEED_DEFAULT_PASSWORD || 'Password@123';
+      const adminPassword = process.env.SEED_ADMIN_PASSWORD || 'Admin@123';
+
+      const defaultPasswordHash = await bcrypt.hash(defaultPassword, 10);
+      const adminPasswordHash = await bcrypt.hash(adminPassword, 10);
 
       await prisma.user.createMany({
         data: [
@@ -65,11 +129,11 @@ async function ensureDefaultAccounts() {
       console.log('[Auth] Default accounts created in PostgreSQL successfully.');
     }
   } catch (err) {
-    console.error('[Auth] Error ensuring default accounts:', err);
+    console.error('[Auth] Error ensuring default accounts:', err instanceof Error ? err.message : 'Unknown');
   }
 }
 
-// Health check endpoint
+// Health check endpoint (Sanitized error response)
 app.get('/api/health', async (_req: Request, res: Response) => {
   try {
     await prisma.$queryRaw`SELECT 1`;
@@ -78,28 +142,30 @@ app.get('/api/health', async (_req: Request, res: Response) => {
       database: 'connected',
       timestamp: new Date().toISOString(),
     });
-  } catch (error: any) {
+  } catch {
     res.status(503).json({
       status: 'degraded',
       database: 'disconnected',
-      error: error.message,
+      error: 'Database service is currently unreachable.',
     });
   }
 });
 
-// Real Database-backed Authentication Endpoint
-app.post('/api/auth/login', async (req: Request, res: Response) => {
+// Authentication Endpoint (Strict rate-limited, Zod-validated, async bcrypt)
+app.post('/api/auth/login', authLimiter, async (req: Request, res: Response) => {
   try {
-    const { email, password } = req.body;
-
-    if (!email || !password) {
+    const parseResult = loginSchema.safeParse(req.body);
+    if (!parseResult.success) {
+      const issue = parseResult.error.issues[0];
       return res.status(400).json({
         success: false,
-        error: 'Email and password are required.',
+        error: issue ? issue.message : 'Invalid login payload.',
       });
     }
 
-    const cleanEmail = String(email).trim().toLowerCase();
+    const { email, password } = parseResult.data;
+    const cleanEmail = email.toLowerCase();
+
     const user = await prisma.user.findUnique({
       where: { email: cleanEmail },
     });
@@ -111,7 +177,7 @@ app.post('/api/auth/login', async (req: Request, res: Response) => {
       });
     }
 
-    const isMatch = bcrypt.compareSync(String(password), user.passwordHash);
+    const isMatch = await bcrypt.compare(password, user.passwordHash);
     if (!isMatch) {
       return res.status(401).json({
         success: false,
@@ -126,9 +192,10 @@ app.post('/api/auth/login', async (req: Request, res: Response) => {
         name: user.name,
         role: user.role,
         villageZone: user.villageZone,
+        jti: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
       },
       env.JWT_SECRET,
-      { expiresIn: (env.JWT_EXPIRES_IN || '7d') as any }
+      { expiresIn: (env.JWT_EXPIRES_IN || '1d') as any }
     );
 
     return res.json({
@@ -144,7 +211,7 @@ app.post('/api/auth/login', async (req: Request, res: Response) => {
       },
     });
   } catch (err: any) {
-    console.error('[Auth] Login error:', err);
+    console.error('[Auth] Login error');
     return res.status(500).json({
       success: false,
       error: 'An internal server error occurred during authentication.',
@@ -152,47 +219,30 @@ app.post('/api/auth/login', async (req: Request, res: Response) => {
   }
 });
 
-// User session verification endpoint
-app.get('/api/auth/me', async (req: Request, res: Response) => {
-  try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ success: false, error: 'Unauthorized: Missing or malformed token' });
-    }
-
-    const token = authHeader.split(' ')[1];
-    const decoded = jwt.verify(token, env.JWT_SECRET) as any;
-
-    const user = await prisma.user.findUnique({
-      where: { id: decoded.id },
-      select: {
-        id: true,
-        name: true,
-        email: true,
-        role: true,
-        villageZone: true,
-        phoneNumber: true,
-      },
-    });
-
-    if (!user) {
-      return res.status(404).json({ success: false, error: 'User account not found' });
-    }
-
-    return res.json({
-      success: true,
-      user: {
-        id: user.id,
-        name: user.name,
-        email: user.email,
-        role: user.role,
-        villageSector: user.villageZone,
-        phoneNumber: user.phoneNumber,
-      },
-    });
-  } catch (err: any) {
-    return res.status(401).json({ success: false, error: 'Invalid or expired session token' });
+// Logout endpoint - Invalidate active session token
+app.post('/api/auth/logout', authenticateToken, (req: AuthRequest, res: Response) => {
+  if (req.token) {
+    revokeToken(req.token);
   }
+  return res.json({
+    success: true,
+    message: 'Logged out successfully. Session token revoked.',
+  });
+});
+
+// User session verification endpoint
+app.get('/api/auth/me', authenticateToken, async (req: AuthRequest, res: Response) => {
+  return res.json({
+    success: true,
+    user: {
+      id: req.user!.id,
+      name: req.user!.name,
+      email: req.user!.email,
+      role: req.user!.role,
+      villageSector: req.user!.villageZone,
+      phoneNumber: req.user!.phoneNumber,
+    },
+  });
 });
 
 // Helper to safely parse and clamp dates within valid PostgreSQL ranges (1900-2100)
@@ -203,7 +253,6 @@ function parseSafeDate(val: any, fallback: Date | null = new Date()): Date | nul
     if (isNaN(d.getTime())) return fallback;
     const year = d.getFullYear();
     if (year < 1900 || year > 2100) {
-      console.warn(`[Sync] Normalizing out-of-range date year ${year} ("${val}").`);
       const str = String(val);
       const match = str.match(/(\d{4})-(\d{2})-(\d{2})/);
       if (match) {
@@ -217,18 +266,21 @@ function parseSafeDate(val: any, fallback: Date | null = new Date()): Date | nul
   }
 }
 
-// Sync endpoint - Receives offline queue batch and persists into PostgreSQL
-app.post('/api/sync', async (req: Request, res: Response) => {
+// Sync endpoint - Authenticated, rate-limited, Zod-validated, IDOR-protected, version-aware
+app.post('/api/sync', authenticateToken, syncLimiter, async (req: AuthRequest, res: Response) => {
   try {
-    const { items } = req.body;
-    if (!Array.isArray(items)) {
+    const parseResult = syncBatchSchema.safeParse(req.body);
+    if (!parseResult.success) {
+      const issue = parseResult.error.issues[0];
       return res.status(400).json({
         success: false,
-        error: 'Invalid request: "items" must be an array of SyncQueueItem',
+        error: issue ? `${issue.path.join('.')}: ${issue.message}` : 'Invalid sync request payload.',
       });
     }
 
-    console.log(`[Sync] Processing sync batch with ${items.length} items...`);
+    const { items } = parseResult.data;
+    const authenticatedUser = req.user!;
+    const userIsSupervisor = isSupervisor(authenticatedUser.role);
 
     const processedIds: string[] = [];
     const failedItems: Array<{ id: string; error: string }> = [];
@@ -243,51 +295,108 @@ app.post('/api/sync', async (req: Request, res: Response) => {
       try {
         const { entityId, entityType, operationType, payload } = item;
 
+        // Idempotency check: Skip duplicate if client already synchronized this exact event
+        const existingAudit = await prisma.syncAuditLog.findFirst({
+          where: {
+            entityId,
+            clientTimestamp: item.createdAt ? parseSafeDate(item.createdAt, null) : undefined,
+            status: 'synced',
+          },
+        });
+        if (existingAudit && item.createdAt) {
+          processedIds.push(item.id);
+          continue;
+        }
+
         if (entityType === 'patient') {
-          const regDate = parseSafeDate(payload.registrationDate, new Date()) || new Date();
-          const lastMod = parseSafeDate(payload.lastModified, new Date()) || new Date();
+          const patientParse = patientPayloadSchema.safeParse(payload);
+          if (!patientParse.success) {
+            failedItems.push({
+              id: item.id,
+              error: `Patient validation failed: ${patientParse.error.issues[0]?.message || 'Invalid fields'}`,
+            });
+            continue;
+          }
+          const validPatient = patientParse.data;
 
-          const patientDisplayId = payload.patientId || payload.displayId || `RC-${(payload.id || entityId).slice(0, 8)}`;
-          const villageName = payload.village || payload.villageZone || 'Ramgarh Sector';
+          const targetId = validPatient.id || entityId;
+          const regDate = parseSafeDate(validPatient.registrationDate, new Date()) || new Date();
+          const lastMod = parseSafeDate(validPatient.lastModified, new Date()) || new Date();
+          const patientDisplayId = validPatient.patientId || `RC-${targetId.slice(0, 8)}`;
+          const villageName = validPatient.village;
 
-          await prisma.patient.upsert({
-            where: { id: payload.id || entityId },
-            update: {
-              patientId: patientDisplayId,
-              fullName: payload.fullName,
-              age: Number(payload.age) || 0,
-              gender: payload.gender || 'Other',
-              village: villageName,
-              contactNumber: payload.contactNumber || '',
-              chwAssigned: payload.chwAssigned || 'Sarah Jenkins',
-              notes: payload.notes || '',
-              syncStatus: 'synced',
-              version: Number(payload.version) || 1,
-              lastModified: lastMod,
-            },
-            create: {
-              id: payload.id || entityId,
-              patientId: patientDisplayId,
-              fullName: payload.fullName,
-              age: Number(payload.age) || 0,
-              gender: payload.gender || 'Other',
-              village: villageName,
-              contactNumber: payload.contactNumber || '',
-              chwAssigned: payload.chwAssigned || 'Sarah Jenkins',
-              registrationDate: regDate,
-              notes: payload.notes || '',
-              syncStatus: 'synced',
-              version: Number(payload.version) || 1,
-              lastModified: lastMod,
-            },
+          // Check if patient already exists for ownership & version checks
+          const existingPatient = await prisma.patient.findUnique({
+            where: { id: targetId },
           });
+
+          if (existingPatient) {
+            // IDOR & Patient Ownership Enforcement:
+            // Non-supervisor CHW can only update patients assigned to them
+            if (!userIsSupervisor && existingPatient.chwAssigned !== authenticatedUser.name) {
+              failedItems.push({
+                id: item.id,
+                error: 'Forbidden: You cannot modify a patient record assigned to another healthcare worker.',
+              });
+              continue;
+            }
+
+            // Version Conflict Check:
+            if (operationType === 'UPDATE' && validPatient.version < existingPatient.version) {
+              failedItems.push({
+                id: item.id,
+                error: `Version conflict: Server record has version ${existingPatient.version}, incoming is ${validPatient.version}.`,
+              });
+              continue;
+            }
+
+            await prisma.patient.update({
+              where: { id: targetId },
+              data: {
+                patientId: patientDisplayId,
+                fullName: validPatient.fullName,
+                age: validPatient.age,
+                gender: validPatient.gender,
+                village: villageName,
+                contactNumber: validPatient.contactNumber,
+                // Supervisors can reassign; CHWs remain the assigned worker
+                chwAssigned: userIsSupervisor && validPatient.chwAssigned ? validPatient.chwAssigned : existingPatient.chwAssigned,
+                notes: validPatient.notes || '',
+                syncStatus: 'synced',
+                version: Math.max(existingPatient.version + 1, validPatient.version + 1),
+                lastModified: lastMod,
+              },
+            });
+          } else {
+            // New patient creation:
+            // For CHW role, always bind ownership to authenticated user
+            const assignedCHW = userIsSupervisor && validPatient.chwAssigned ? validPatient.chwAssigned : authenticatedUser.name;
+
+            await prisma.patient.create({
+              data: {
+                id: targetId,
+                patientId: patientDisplayId,
+                fullName: validPatient.fullName,
+                age: validPatient.age,
+                gender: validPatient.gender,
+                village: villageName,
+                contactNumber: validPatient.contactNumber,
+                chwAssigned: assignedCHW,
+                registrationDate: regDate,
+                notes: validPatient.notes || '',
+                syncStatus: 'synced',
+                version: validPatient.version || 1,
+                lastModified: lastMod,
+              },
+            });
+          }
 
           await prisma.syncAuditLog.create({
             data: {
               entityType: 'patient',
-              entityId: payload.id || entityId,
+              entityId: targetId,
               operationType: operationType || 'CREATE',
-              payload: payload,
+              payload: validPatient,
               status: 'synced',
               clientTimestamp: parseSafeDate(item.createdAt, new Date()),
             },
@@ -295,50 +404,87 @@ app.post('/api/sync', async (req: Request, res: Response) => {
 
           processedIds.push(item.id);
         } else if (entityType === 'followup') {
-          const visitDate = parseSafeDate(payload.visitDate, new Date()) || new Date();
-          const nextDate = payload.nextFollowUpDate ? parseSafeDate(payload.nextFollowUpDate, null) : null;
-          const lastMod = parseSafeDate(payload.lastModified, new Date()) || new Date();
+          const fuParse = followUpPayloadSchema.safeParse(payload);
+          if (!fuParse.success) {
+            failedItems.push({
+              id: item.id,
+              error: `FollowUp validation failed: ${fuParse.error.issues[0]?.message || 'Invalid fields'}`,
+            });
+            continue;
+          }
+          const validFu = fuParse.data;
 
-          // Ensure parent patient exists in PostgreSQL
+          const targetId = validFu.id || entityId;
+          const visitDate = parseSafeDate(validFu.visitDate, new Date()) || new Date();
+          const nextDate = validFu.nextFollowUpDate ? parseSafeDate(validFu.nextFollowUpDate, null) : null;
+          const lastMod = parseSafeDate(validFu.lastModified, new Date()) || new Date();
+
+          // Ensure parent patient exists and belongs to this worker (unless supervisor)
           const parentPatient = await prisma.patient.findUnique({
-            where: { id: payload.patientId },
+            where: { id: validFu.patientId },
           });
 
           if (!parentPatient) {
-            console.warn(`[Sync] Parent patient ${payload.patientId} not found yet for follow-up ${entityId}.`);
+            failedItems.push({
+              id: item.id,
+              error: `Parent patient ${validFu.patientId} does not exist.`,
+            });
+            continue;
           }
 
+          if (!userIsSupervisor && parentPatient.chwAssigned !== authenticatedUser.name) {
+            failedItems.push({
+              id: item.id,
+              error: 'Forbidden: You cannot record follow-up visits for a patient assigned to another healthcare worker.',
+            });
+            continue;
+          }
+
+          const existingFu = await prisma.followUp.findUnique({
+            where: { id: targetId },
+          });
+
+          if (existingFu && operationType === 'UPDATE' && validFu.version < existingFu.version) {
+            failedItems.push({
+              id: item.id,
+              error: `Version conflict on follow-up: Server is version ${existingFu.version}.`,
+            });
+            continue;
+          }
+
+          const chwName = userIsSupervisor && validFu.chwName ? validFu.chwName : authenticatedUser.name;
+
           await prisma.followUp.upsert({
-            where: { id: payload.id || entityId },
+            where: { id: targetId },
             update: {
-              patientId: payload.patientId,
-              patientDisplayId: payload.patientDisplayId || 'RC-FIELD',
-              patientName: payload.patientName,
-              visitDate: visitDate,
-              category: payload.category,
-              observations: payload.observations,
-              notes: payload.notes || '',
+              patientId: validFu.patientId,
+              patientDisplayId: validFu.patientDisplayId || parentPatient.patientId,
+              patientName: validFu.patientName,
+              visitDate,
+              category: validFu.category,
+              observations: validFu.observations,
+              notes: validFu.notes || '',
               nextFollowUpDate: nextDate,
-              status: payload.status || 'completed',
-              chwName: payload.chwName || 'Sarah Jenkins',
+              status: validFu.status || 'completed',
+              chwName,
               syncStatus: 'synced',
-              version: Number(payload.version) || 1,
+              version: existingFu ? existingFu.version + 1 : validFu.version || 1,
               lastModified: lastMod,
             },
             create: {
-              id: payload.id || entityId,
-              patientId: payload.patientId,
-              patientDisplayId: payload.patientDisplayId || 'RC-FIELD',
-              patientName: payload.patientName,
-              visitDate: visitDate,
-              category: payload.category,
-              observations: payload.observations,
-              notes: payload.notes || '',
+              id: targetId,
+              patientId: validFu.patientId,
+              patientDisplayId: validFu.patientDisplayId || parentPatient.patientId,
+              patientName: validFu.patientName,
+              visitDate,
+              category: validFu.category,
+              observations: validFu.observations,
+              notes: validFu.notes || '',
               nextFollowUpDate: nextDate,
-              status: payload.status || 'completed',
-              chwName: payload.chwName || 'Sarah Jenkins',
+              status: validFu.status || 'completed',
+              chwName,
               syncStatus: 'synced',
-              version: Number(payload.version) || 1,
+              version: validFu.version || 1,
               lastModified: lastMod,
             },
           });
@@ -346,9 +492,9 @@ app.post('/api/sync', async (req: Request, res: Response) => {
           await prisma.syncAuditLog.create({
             data: {
               entityType: 'followup',
-              entityId: payload.id || entityId,
+              entityId: targetId,
               operationType: operationType || 'CREATE',
-              payload: payload,
+              payload: validFu,
               status: 'synced',
               clientTimestamp: parseSafeDate(item.createdAt, new Date()),
             },
@@ -356,46 +502,79 @@ app.post('/api/sync', async (req: Request, res: Response) => {
 
           processedIds.push(item.id);
         } else if (entityType === 'task') {
-          const dueDate = parseSafeDate(payload.dueDate, new Date()) || new Date();
-          const completedAt = payload.completedAt ? parseSafeDate(payload.completedAt, null) : null;
-          const lastMod = parseSafeDate(payload.lastModified, new Date()) || new Date();
+          const taskParse = taskPayloadSchema.safeParse(payload);
+          if (!taskParse.success) {
+            failedItems.push({
+              id: item.id,
+              error: `Task validation failed: ${taskParse.error.issues[0]?.message || 'Invalid fields'}`,
+            });
+            continue;
+          }
+          const validTask = taskParse.data;
 
-          // Validate patientId relation if specified
+          const targetId = validTask.id || entityId;
+          const dueDate = parseSafeDate(validTask.dueDate, new Date()) || new Date();
+          const completedAt = validTask.completedAt ? parseSafeDate(validTask.completedAt, null) : null;
+          const lastMod = parseSafeDate(validTask.lastModified, new Date()) || new Date();
+
           let validPatientId: string | null = null;
-          if (payload.patientId) {
-            const exists = await prisma.patient.findUnique({ where: { id: payload.patientId } });
-            if (exists) validPatientId = payload.patientId;
+          if (validTask.patientId) {
+            const pExists = await prisma.patient.findUnique({ where: { id: validTask.patientId } });
+            if (pExists) {
+              if (!userIsSupervisor && pExists.chwAssigned !== authenticatedUser.name) {
+                failedItems.push({
+                  id: item.id,
+                  error: 'Forbidden: You cannot assign or modify tasks for another worker\'s patient.',
+                });
+                continue;
+              }
+              validPatientId = validTask.patientId;
+            }
           }
 
+          const existingTask = await prisma.task.findUnique({
+            where: { id: targetId },
+          });
+
+          if (existingTask && !userIsSupervisor && existingTask.assignedChw !== authenticatedUser.name) {
+            failedItems.push({
+              id: item.id,
+              error: 'Forbidden: You cannot update a task assigned to another worker.',
+            });
+            continue;
+          }
+
+          const assignedChw = userIsSupervisor && validTask.assignedChw ? validTask.assignedChw : authenticatedUser.name;
+
           await prisma.task.upsert({
-            where: { id: payload.id || entityId },
+            where: { id: targetId },
             update: {
-              title: payload.title,
+              title: validTask.title,
               patientId: validPatientId,
-              patientName: payload.patientName || null,
-              dueDate: dueDate,
-              priority: payload.priority || 'medium',
-              completed: Boolean(payload.completed),
-              completedAt: completedAt,
-              assignedChw: payload.assignedChw || 'Sarah Jenkins',
-              category: payload.category || 'Administrative',
+              patientName: validTask.patientName || null,
+              dueDate,
+              priority: validTask.priority,
+              completed: Boolean(validTask.completed),
+              completedAt,
+              assignedChw,
+              category: validTask.category,
               syncStatus: 'synced',
-              version: Number(payload.version) || 1,
+              version: existingTask ? existingTask.version + 1 : validTask.version || 1,
               lastModified: lastMod,
             },
             create: {
-              id: payload.id || entityId,
-              title: payload.title,
+              id: targetId,
+              title: validTask.title,
               patientId: validPatientId,
-              patientName: payload.patientName || null,
-              dueDate: dueDate,
-              priority: payload.priority || 'medium',
-              completed: Boolean(payload.completed),
-              completedAt: completedAt,
-              assignedChw: payload.assignedChw || 'Sarah Jenkins',
-              category: payload.category || 'Administrative',
+              patientName: validTask.patientName || null,
+              dueDate,
+              priority: validTask.priority,
+              completed: Boolean(validTask.completed),
+              completedAt,
+              assignedChw,
+              category: validTask.category,
               syncStatus: 'synced',
-              version: Number(payload.version) || 1,
+              version: validTask.version || 1,
               lastModified: lastMod,
             },
           });
@@ -403,9 +582,9 @@ app.post('/api/sync', async (req: Request, res: Response) => {
           await prisma.syncAuditLog.create({
             data: {
               entityType: 'task',
-              entityId: payload.id || entityId,
+              entityId: targetId,
               operationType: operationType || 'CREATE',
-              payload: payload,
+              payload: validTask,
               status: 'synced',
               clientTimestamp: parseSafeDate(item.createdAt, new Date()),
             },
@@ -414,15 +593,12 @@ app.post('/api/sync', async (req: Request, res: Response) => {
           processedIds.push(item.id);
         }
       } catch (itemError: any) {
-        console.error(`[Sync] Error syncing item ${item.id}:`, itemError);
         failedItems.push({
           id: item.id,
-          error: itemError.message || 'Unknown database error',
+          error: 'An internal error occurred processing this queue item.',
         });
       }
     }
-
-    console.log(`[Sync] Sync complete. ${processedIds.length} succeeded, ${failedItems.length} failed.`);
 
     return res.json({
       success: true,
@@ -430,56 +606,105 @@ app.post('/api/sync', async (req: Request, res: Response) => {
       failedItems,
       syncedAt: new Date().toISOString(),
     });
-  } catch (err: any) {
-    console.error('[Sync] Fatal sync endpoint error:', err);
+  } catch {
     return res.status(500).json({
       success: false,
-      error: 'Internal server error processing synchronization batch',
+      error: 'Internal server error processing synchronization batch.',
     });
   }
 });
 
-// Query endpoints for dashboard and audit
-app.get('/api/patients', async (_req: Request, res: Response) => {
+// Patient Query Endpoint: Authenticated & Scoped to Worker/Supervisor
+app.get('/api/patients', authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
+    const user = req.user!;
+    const userIsSupervisor = isSupervisor(user.role);
+
+    // CHWs are strictly scoped to their assigned patients; Supervisors see all sector patients
+    const whereClause = userIsSupervisor
+      ? {}
+      : {
+          chwAssigned: user.name,
+        };
+
     const patients = await prisma.patient.findMany({
+      where: whereClause,
       orderBy: { registrationDate: 'desc' },
       include: { followUps: true, tasks: true },
     });
+
     res.json({ success: true, count: patients.length, data: patients });
-  } catch (err: any) {
-    res.status(500).json({ success: false, error: err.message });
+  } catch {
+    res.status(500).json({ success: false, error: 'Failed to retrieve patient records.' });
   }
 });
 
-app.get('/api/follow-ups', async (_req: Request, res: Response) => {
+// Follow-ups Query Endpoint: Authenticated & Scoped
+app.get('/api/follow-ups', authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
+    const user = req.user!;
+    const userIsSupervisor = isSupervisor(user.role);
+
+    const whereClause = userIsSupervisor
+      ? {}
+      : {
+          chwName: user.name,
+        };
+
     const followUps = await prisma.followUp.findMany({
+      where: whereClause,
       orderBy: { visitDate: 'desc' },
     });
+
     res.json({ success: true, count: followUps.length, data: followUps });
-  } catch (err: any) {
-    res.status(500).json({ success: false, error: err.message });
+  } catch {
+    res.status(500).json({ success: false, error: 'Failed to retrieve follow-up records.' });
   }
 });
 
-app.get('/api/tasks', async (_req: Request, res: Response) => {
+// Tasks Query Endpoint: Authenticated & Scoped
+app.get('/api/tasks', authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
+    const user = req.user!;
+    const userIsSupervisor = isSupervisor(user.role);
+
+    const whereClause = userIsSupervisor
+      ? {}
+      : {
+          assignedChw: user.name,
+        };
+
     const tasks = await prisma.task.findMany({
+      where: whereClause,
       orderBy: { dueDate: 'asc' },
     });
+
     res.json({ success: true, count: tasks.length, data: tasks });
-  } catch (err: any) {
-    res.status(500).json({ success: false, error: err.message });
+  } catch {
+    res.status(500).json({ success: false, error: 'Failed to retrieve tasks.' });
   }
 });
+
+// Centralized generic error handler (OWASP ASVS error leakage protection)
+app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
+  console.error('[Error]', err?.name || 'ServerError');
+  res.status(err.status || 500).json({
+    success: false,
+    error: 'An internal server error occurred.',
+  });
+});
+
+// Export app for test suites
+export { app };
 
 // Start Express server
 const PORT = env.PORT || 5000;
-app.listen(PORT, async () => {
-  console.log(`🚀 RuralCare Connect API Server running at http://localhost:${PORT}`);
-  console.log(`📡 Health Check: http://localhost:${PORT}/api/health`);
-  console.log(`🔐 Auth Endpoints: http://localhost:${PORT}/api/auth/login`);
-  console.log(`🔄 Sync Endpoint: http://localhost:${PORT}/api/sync`);
-  await ensureDefaultAccounts();
-});
+if (process.env.NODE_ENV !== 'test') {
+  app.listen(PORT, async () => {
+    console.log(`🚀 RuralCare Connect Hardened API running at http://localhost:${PORT}`);
+    console.log(`📡 Health Check: http://localhost:${PORT}/api/health`);
+    console.log(`🔐 Auth Endpoints: http://localhost:${PORT}/api/auth/login`);
+    console.log(`🔄 Sync Endpoint: http://localhost:${PORT}/api/sync`);
+    await ensureDefaultAccounts();
+  });
+}

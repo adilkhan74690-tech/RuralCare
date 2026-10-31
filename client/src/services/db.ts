@@ -46,29 +46,40 @@ export async function initDatabase(): Promise<void> {
   if (patientCount === 0) {
     console.log('[RuralCareDB] Local database is empty. Hydrating baseline records...');
 
-    // Attempt to pull existing records from PostgreSQL if online
+    // Attempt to pull existing records from PostgreSQL if online and authenticated
     if (typeof navigator !== 'undefined' && navigator.onLine) {
       try {
-        const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000/api';
-        const [patRes, fuRes, taskRes] = await Promise.all([
-          fetch(`${API_BASE_URL}/patients`),
-          fetch(`${API_BASE_URL}/follow-ups`),
-          fetch(`${API_BASE_URL}/tasks`),
-        ]);
+        let token: string | null = null;
+        try {
+          const raw = localStorage.getItem('ruralcare_auth_session') || sessionStorage.getItem('ruralcare_auth_session');
+          if (raw) token = JSON.parse(raw)?.token || null;
+        } catch {
+          // ignore
+        }
 
-        if (patRes.ok && fuRes.ok && taskRes.ok) {
-          const patData = await patRes.json();
-          const fuData = await fuRes.json();
-          const taskData = await taskRes.json();
+        if (token) {
+          const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000/api';
+          const headers = { Authorization: `Bearer ${token}` };
+          const [patRes, fuRes, taskRes] = await Promise.all([
+            fetch(`${API_BASE_URL}/patients`, { headers }),
+            fetch(`${API_BASE_URL}/follow-ups`, { headers }),
+            fetch(`${API_BASE_URL}/tasks`, { headers }),
+          ]);
 
-          if (patData.data && patData.data.length > 0) {
-            console.log(`[RuralCareDB] Loaded ${patData.data.length} existing patient records from PostgreSQL.`);
-            await db.transaction('rw', [db.patients, db.followUps, db.tasks], async () => {
-              await db.patients.bulkPut(patData.data.map((p: any) => ({ ...p, syncStatus: 'synced' })));
-              if (fuData.data) await db.followUps.bulkPut(fuData.data.map((f: any) => ({ ...f, syncStatus: 'synced' })));
-              if (taskData.data) await db.tasks.bulkPut(taskData.data.map((t: any) => ({ ...t, syncStatus: 'synced' })));
-            });
-            return;
+          if (patRes.ok && fuRes.ok && taskRes.ok) {
+            const patData = await patRes.json();
+            const fuData = await fuRes.json();
+            const taskData = await taskRes.json();
+
+            if (patData.data && patData.data.length > 0) {
+              console.log(`[RuralCareDB] Loaded ${patData.data.length} existing patient records from PostgreSQL.`);
+              await db.transaction('rw', [db.patients, db.followUps, db.tasks], async () => {
+                await db.patients.bulkPut(patData.data.map((p: any) => ({ ...p, syncStatus: 'synced' })));
+                if (fuData.data) await db.followUps.bulkPut(fuData.data.map((f: any) => ({ ...f, syncStatus: 'synced' })));
+                if (taskData.data) await db.tasks.bulkPut(taskData.data.map((t: any) => ({ ...t, syncStatus: 'synced' })));
+              });
+              return;
+            }
           }
         }
       } catch (e: any) {
@@ -169,7 +180,7 @@ export const dbService = {
         await db.syncQueue.add(syncItem);
       });
 
-      console.log(`[RuralCareDB] Patient ${newPatient.fullName} (${newPatient.patientId}) saved to IndexedDB.`);
+      console.log('[RuralCareDB] Patient record saved to IndexedDB.');
       return newPatient;
     } finally {
       // Release lock after small debounce window to prevent rapid double-clicks
@@ -284,7 +295,7 @@ export const dbService = {
         }
       });
 
-      console.log(`[RuralCareDB] Follow-up for ${newFollowUp.patientName} saved to IndexedDB.`);
+      console.log('[RuralCareDB] Follow-up record saved to IndexedDB.');
       return newFollowUp;
     } finally {
       setTimeout(() => pendingSubmissions.delete(submissionKey), 1000);

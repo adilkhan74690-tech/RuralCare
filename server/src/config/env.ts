@@ -23,7 +23,7 @@ const envSchema = z.object({
     ),
   JWT_SECRET: z
     .string()
-    .min(16, 'JWT_SECRET must be at least 16 characters long for cryptographic security'),
+    .min(32, 'JWT_SECRET must be at least 32 characters long for cryptographic security'),
   JWT_EXPIRES_IN: z
     .string()
     .default('1d'),
@@ -31,7 +31,18 @@ const envSchema = z.object({
     .string()
     .url('CLIENT_URL must be a valid URL (e.g. http://localhost:5173)')
     .default('http://localhost:5173'),
-});
+}).refine(
+  (data) => {
+    if (data.NODE_ENV === 'production') {
+      return data.CLIENT_URL.startsWith('https://');
+    }
+    return true;
+  },
+  {
+    message: 'In production mode, CLIENT_URL must use HTTPS (e.g. https://ruralcare.org)',
+    path: ['CLIENT_URL'],
+  }
+);
 
 function validateEnvironment() {
   const result = envSchema.safeParse(process.env);

@@ -13,6 +13,7 @@ import {
   Filter
 } from 'lucide-react';
 import { Task, TaskPriority, Patient } from '../types';
+import { useAuth } from '../context/AuthContext';
 
 interface TaskManagerProps {
   tasks: Task[];
@@ -27,6 +28,7 @@ export const TaskManager: React.FC<TaskManagerProps> = ({
   onToggleTask,
   onAddTask,
 }) => {
+  const { user } = useAuth();
   const [filter, setFilter] = useState<'ALL' | 'PENDING' | 'OVERDUE' | 'COMPLETED'>('PENDING');
   const [showAddForm, setShowAddForm] = useState(false);
 
@@ -59,7 +61,7 @@ export const TaskManager: React.FC<TaskManagerProps> = ({
       dueDate,
       priority,
       completed: false,
-      assignedChw: 'Sarah Jenkins',
+      assignedChw: user?.name || 'Community Health Worker',
       category: 'Administrative',
       syncStatus: 'pending',
       version: 1,

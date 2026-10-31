@@ -5,6 +5,7 @@ import { BrutalButton } from '../components/ui/BrutalButton';
 import { BrutalInput } from '../components/ui/BrutalInput';
 import { BrutalSelect } from '../components/ui/BrutalSelect';
 import { UserPlus, ArrowLeft } from 'lucide-react';
+import { useAuth } from '../context/AuthContext';
 import { Patient } from '../types';
 
 interface AddPatientProps {
@@ -13,6 +14,7 @@ interface AddPatientProps {
 
 export const AddPatient: React.FC<AddPatientProps> = ({ onAddPatient }) => {
   const navigate = useNavigate();
+  const { user } = useAuth();
 
   // Generated standard ID
   const defaultDisplayId = `RC-2026-${Math.floor(100 + Math.random() * 900)}`;
@@ -22,7 +24,7 @@ export const AddPatient: React.FC<AddPatientProps> = ({ onAddPatient }) => {
   const [gender, setGender] = useState<'Female' | 'Male' | 'Other'>('Female');
   const [village, setVillage] = useState('Ramgarh');
   const [contactNumber, setContactNumber] = useState('');
-  const [chwAssigned, setChwAssigned] = useState('Sarah Jenkins');
+  const [chwAssigned, setChwAssigned] = useState(user?.name || 'Sarah Jenkins');
   const [notes, setNotes] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -156,7 +158,7 @@ export const AddPatient: React.FC<AddPatientProps> = ({ onAddPatient }) => {
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <BrutalInput
             label="Contact Phone"
-            placeholder="e.g. +91 98765 43210"
+            placeholder="Mobile Number"
             value={contactNumber}
             onChange={(e) => setContactNumber(e.target.value)}
             error={errors.contactNumber}
