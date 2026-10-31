@@ -18,6 +18,7 @@ import {
   patientPayloadSchema,
   followUpPayloadSchema,
   taskPayloadSchema,
+  emergencyPayloadSchema,
 } from './validation/schemas';
 
 const app = express();
@@ -287,7 +288,7 @@ app.post('/api/sync', authenticateToken, syncLimiter, async (req: AuthRequest, r
 
     // Sort items so 'patient' records are processed first (satisfies foreign key constraints)
     const sortedItems = [...items].sort((a, b) => {
-      const order: Record<string, number> = { patient: 1, task: 2, followup: 3 };
+      const order: Record<string, number> = { patient: 1, task: 2, followup: 3, emergency: 4 };
       return (order[a.entityType] || 99) - (order[b.entityType] || 99);
     });
 
@@ -591,6 +592,129 @@ app.post('/api/sync', authenticateToken, syncLimiter, async (req: AuthRequest, r
           });
 
           processedIds.push(item.id);
+        } else if (entityType === 'emergency') {
+          const emParse = emergencyPayloadSchema.safeParse(payload);
+          if (!emParse.success) {
+            failedItems.push({
+              id: item.id,
+              error: `Emergency validation failed: ${emParse.error.issues[0]?.message || 'Invalid fields'}`,
+            });
+            continue;
+          }
+          const validEm = emParse.data;
+
+          const targetId = validEm.id || entityId;
+          const incidentTs = parseSafeDate(validEm.incidentTimestamp, new Date()) || new Date();
+          const lastMod = parseSafeDate(validEm.lastModified, new Date()) || new Date();
+          const arrivedAt = validEm.arrivedAt ? parseSafeDate(validEm.arrivedAt, null) : null;
+          const incidentCode = validEm.incidentCode || `EMG-2026-${targetId.slice(0, 6).toUpperCase()}`;
+
+          // If linked to an existing patient, verify ownership
+          let validPatientId: string | null = null;
+          if (validEm.patientId) {
+            const parentPatient = await prisma.patient.findUnique({
+              where: { id: validEm.patientId },
+            });
+            if (parentPatient) {
+              if (!userIsSupervisor && parentPatient.chwAssigned !== authenticatedUser.name) {
+                failedItems.push({
+                  id: item.id,
+                  error: 'Forbidden: You cannot register an emergency for a patient assigned to another healthcare worker.',
+                });
+                continue;
+              }
+              validPatientId = validEm.patientId;
+            }
+          }
+
+          const existingEm = await prisma.emergencyIncident.findUnique({
+            where: { id: targetId },
+          });
+
+          if (existingEm && !userIsSupervisor && existingEm.ashaWorkerName !== authenticatedUser.name) {
+            failedItems.push({
+              id: item.id,
+              error: 'Forbidden: You cannot modify an emergency incident logged by another healthcare worker.',
+            });
+            continue;
+          }
+
+          if (existingEm && operationType === 'UPDATE' && validEm.version < existingEm.version) {
+            failedItems.push({
+              id: item.id,
+              error: `Version conflict on emergency incident: Server is version ${existingEm.version}.`,
+            });
+            continue;
+          }
+
+          const workerName = userIsSupervisor && validEm.ashaWorkerName ? validEm.ashaWorkerName : authenticatedUser.name;
+          const workerId = userIsSupervisor && validEm.ashaWorkerId ? validEm.ashaWorkerId : authenticatedUser.id;
+
+          const emData = {
+            incidentCode,
+            patientId: validPatientId,
+            patientDisplayId: validEm.patientDisplayId || null,
+            patientName: validEm.patientName,
+            isUnregistered: Boolean(validEm.isUnregistered),
+            unregisteredPatientAge: validEm.unregisteredPatientAge ?? null,
+            unregisteredGender: validEm.unregisteredGender ?? null,
+            ashaWorkerId: workerId,
+            ashaWorkerName: workerName,
+            incidentTimestamp: incidentTs,
+            workerLatitude: validEm.workerLatitude ?? null,
+            workerLongitude: validEm.workerLongitude ?? null,
+            patientLatitude: validEm.patientLatitude ?? null,
+            patientLongitude: validEm.patientLongitude ?? null,
+            locationType: validEm.locationType || 'same_as_worker',
+            manualAddress: validEm.manualAddress ?? null,
+            village: validEm.village ?? null,
+            landmark: validEm.landmark ?? null,
+            category: validEm.category,
+            priority: validEm.priority || 'urgent',
+            chiefComplaints: validEm.chiefComplaints ?? null,
+            notes: validEm.notes || '',
+            referralStatus: validEm.referralStatus || 'initiated',
+            facilityId: validEm.facilityId ?? null,
+            facilityName: validEm.facilityName ?? null,
+            facilityType: validEm.facilityType ?? null,
+            facilityPhone: validEm.facilityPhone ?? null,
+            facilityAddress: validEm.facilityAddress ?? null,
+            facilityDistanceKm: validEm.facilityDistanceKm ?? null,
+            contactAttempts: validEm.contactAttempts ?? undefined,
+            transportType: validEm.transportType ?? null,
+            transportContact: validEm.transportContact ?? null,
+            transportNotes: validEm.transportNotes ?? null,
+            dispatchConfirmed: Boolean(validEm.dispatchConfirmed),
+            arrivedAt,
+            handoverTo: validEm.handoverTo ?? null,
+            handoverNotes: validEm.handoverNotes ?? null,
+            referralCode: validEm.referralCode ?? null,
+            syncStatus: 'synced',
+            version: existingEm ? existingEm.version + 1 : validEm.version || 1,
+            lastModified: lastMod,
+          };
+
+          await prisma.emergencyIncident.upsert({
+            where: { id: targetId },
+            update: emData,
+            create: {
+              id: targetId,
+              ...emData,
+            },
+          });
+
+          await prisma.syncAuditLog.create({
+            data: {
+              entityType: 'emergency',
+              entityId: targetId,
+              operationType: operationType || 'CREATE',
+              payload: validEm,
+              status: 'synced',
+              clientTimestamp: parseSafeDate(item.createdAt, new Date()),
+            },
+          });
+
+          processedIds.push(item.id);
         }
       } catch (itemError: any) {
         failedItems.push({
@@ -682,6 +806,238 @@ app.get('/api/tasks', authenticateToken, async (req: AuthRequest, res: Response)
     res.json({ success: true, count: tasks.length, data: tasks });
   } catch {
     res.status(500).json({ success: false, error: 'Failed to retrieve tasks.' });
+  }
+});
+
+// Emergency Incidents Query Endpoint: Authenticated & Scoped
+app.get('/api/emergencies', authenticateToken, async (req: AuthRequest, res: Response) => {
+  try {
+    const user = req.user!;
+    const userIsSupervisor = isSupervisor(user.role);
+
+    const whereClause = userIsSupervisor
+      ? {}
+      : {
+          ashaWorkerName: user.name,
+        };
+
+    const incidents = await prisma.emergencyIncident.findMany({
+      where: whereClause,
+      orderBy: { incidentTimestamp: 'desc' },
+      include: { patient: true },
+    });
+
+    res.json({ success: true, count: incidents.length, data: incidents });
+  } catch {
+    res.status(500).json({ success: false, error: 'Failed to retrieve emergency incidents.' });
+  }
+});
+
+// Emergency Incident by ID: Authenticated & Scoped
+app.get('/api/emergencies/:id', authenticateToken, async (req: AuthRequest, res: Response) => {
+  try {
+    const user = req.user!;
+    const userIsSupervisor = isSupervisor(user.role);
+    const { id } = req.params;
+
+    const incident = await prisma.emergencyIncident.findUnique({
+      where: { id },
+      include: { patient: true },
+    });
+
+    if (!incident) {
+      return res.status(404).json({ success: false, error: 'Emergency incident not found.' });
+    }
+
+    if (!userIsSupervisor && incident.ashaWorkerName !== user.name) {
+      return res.status(403).json({
+        success: false,
+        error: 'Forbidden: You do not have permission to view this emergency incident.',
+      });
+    }
+
+    res.json({ success: true, data: incident });
+  } catch {
+    res.status(500).json({ success: false, error: 'Failed to retrieve emergency incident.' });
+  }
+});
+
+// Emergency Incident Creation Endpoint: Authenticated & Validated
+app.post('/api/emergencies', authenticateToken, async (req: AuthRequest, res: Response) => {
+  try {
+    const user = req.user!;
+    const userIsSupervisor = isSupervisor(user.role);
+
+    const parseResult = emergencyPayloadSchema.safeParse(req.body);
+    if (!parseResult.success) {
+      return res.status(400).json({
+        success: false,
+        error: parseResult.error.issues[0]?.message || 'Invalid emergency payload.',
+      });
+    }
+
+    const validEm = parseResult.data;
+    const targetId = validEm.id || `emg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const incidentCode = validEm.incidentCode || `EMG-2026-${Math.floor(1000 + Math.random() * 9000)}`;
+    const incidentTs = parseSafeDate(validEm.incidentTimestamp, new Date()) || new Date();
+    const arrivedAt = validEm.arrivedAt ? parseSafeDate(validEm.arrivedAt, null) : null;
+
+    let validPatientId: string | null = null;
+    if (validEm.patientId) {
+      const parentPatient = await prisma.patient.findUnique({
+        where: { id: validEm.patientId },
+      });
+      if (!parentPatient) {
+        return res.status(404).json({ success: false, error: 'Referenced patient not found.' });
+      }
+      if (!userIsSupervisor && parentPatient.chwAssigned !== user.name) {
+        return res.status(403).json({
+          success: false,
+          error: 'Forbidden: Patient belongs to another healthcare worker.',
+        });
+      }
+      validPatientId = validEm.patientId;
+    }
+
+    const workerName = userIsSupervisor && validEm.ashaWorkerName ? validEm.ashaWorkerName : user.name;
+    const workerId = userIsSupervisor && validEm.ashaWorkerId ? validEm.ashaWorkerId : user.id;
+
+    const newIncident = await prisma.emergencyIncident.create({
+      data: {
+        id: targetId,
+        incidentCode,
+        patientId: validPatientId,
+        patientDisplayId: validEm.patientDisplayId || null,
+        patientName: validEm.patientName,
+        isUnregistered: Boolean(validEm.isUnregistered),
+        unregisteredPatientAge: validEm.unregisteredPatientAge ?? null,
+        unregisteredGender: validEm.unregisteredGender ?? null,
+        ashaWorkerId: workerId,
+        ashaWorkerName: workerName,
+        incidentTimestamp: incidentTs,
+        workerLatitude: validEm.workerLatitude ?? null,
+        workerLongitude: validEm.workerLongitude ?? null,
+        patientLatitude: validEm.patientLatitude ?? null,
+        patientLongitude: validEm.patientLongitude ?? null,
+        locationType: validEm.locationType || 'same_as_worker',
+        manualAddress: validEm.manualAddress ?? null,
+        village: validEm.village ?? null,
+        landmark: validEm.landmark ?? null,
+        category: validEm.category,
+        priority: validEm.priority || 'urgent',
+        chiefComplaints: validEm.chiefComplaints ?? null,
+        notes: validEm.notes || '',
+        referralStatus: validEm.referralStatus || 'initiated',
+        facilityId: validEm.facilityId ?? null,
+        facilityName: validEm.facilityName ?? null,
+        facilityType: validEm.facilityType ?? null,
+        facilityPhone: validEm.facilityPhone ?? null,
+        facilityAddress: validEm.facilityAddress ?? null,
+        facilityDistanceKm: validEm.facilityDistanceKm ?? null,
+        contactAttempts: validEm.contactAttempts ?? undefined,
+        transportType: validEm.transportType ?? null,
+        transportContact: validEm.transportContact ?? null,
+        transportNotes: validEm.transportNotes ?? null,
+        dispatchConfirmed: Boolean(validEm.dispatchConfirmed),
+        arrivedAt,
+        handoverTo: validEm.handoverTo ?? null,
+        handoverNotes: validEm.handoverNotes ?? null,
+        referralCode: validEm.referralCode ?? `REF-2026-${Math.floor(10000 + Math.random() * 90000)}`,
+        syncStatus: 'synced',
+        version: 1,
+      },
+    });
+
+    await prisma.syncAuditLog.create({
+      data: {
+        entityType: 'emergency',
+        entityId: targetId,
+        operationType: 'CREATE',
+        payload: validEm,
+        status: 'synced',
+        clientTimestamp: new Date(),
+      },
+    });
+
+    res.status(201).json({ success: true, data: newIncident });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: 'Failed to create emergency incident.' });
+  }
+});
+
+// Emergency Incident Update Endpoint: Authenticated, Validated & IDOR-Protected
+app.put('/api/emergencies/:id', authenticateToken, async (req: AuthRequest, res: Response) => {
+  try {
+    const user = req.user!;
+    const userIsSupervisor = isSupervisor(user.role);
+    const { id } = req.params;
+
+    const existingEm = await prisma.emergencyIncident.findUnique({ where: { id } });
+    if (!existingEm) {
+      return res.status(404).json({ success: false, error: 'Emergency incident not found.' });
+    }
+
+    if (!userIsSupervisor && existingEm.ashaWorkerName !== user.name) {
+      return res.status(403).json({
+        success: false,
+        error: 'Forbidden: You cannot modify an emergency incident recorded by another worker.',
+      });
+    }
+
+    const parseResult = emergencyPayloadSchema.partial().safeParse(req.body);
+    if (!parseResult.success) {
+      return res.status(400).json({
+        success: false,
+        error: parseResult.error.issues[0]?.message || 'Invalid update payload.',
+      });
+    }
+
+    const validEm = parseResult.data;
+    const arrivedAt = validEm.arrivedAt ? parseSafeDate(validEm.arrivedAt, null) : existingEm.arrivedAt;
+
+    const updated = await prisma.emergencyIncident.update({
+      where: { id },
+      data: {
+        patientName: validEm.patientName ?? existingEm.patientName,
+        category: validEm.category ?? existingEm.category,
+        priority: validEm.priority ?? existingEm.priority,
+        chiefComplaints: validEm.chiefComplaints ?? existingEm.chiefComplaints,
+        notes: validEm.notes ?? existingEm.notes,
+        referralStatus: validEm.referralStatus ?? existingEm.referralStatus,
+        facilityId: validEm.facilityId ?? existingEm.facilityId,
+        facilityName: validEm.facilityName ?? existingEm.facilityName,
+        facilityType: validEm.facilityType ?? existingEm.facilityType,
+        facilityPhone: validEm.facilityPhone ?? existingEm.facilityPhone,
+        facilityAddress: validEm.facilityAddress ?? existingEm.facilityAddress,
+        facilityDistanceKm: validEm.facilityDistanceKm ?? existingEm.facilityDistanceKm,
+        contactAttempts: validEm.contactAttempts ?? existingEm.contactAttempts,
+        transportType: validEm.transportType ?? existingEm.transportType,
+        transportContact: validEm.transportContact ?? existingEm.transportContact,
+        transportNotes: validEm.transportNotes ?? existingEm.transportNotes,
+        dispatchConfirmed: validEm.dispatchConfirmed !== undefined ? Boolean(validEm.dispatchConfirmed) : existingEm.dispatchConfirmed,
+        arrivedAt,
+        handoverTo: validEm.handoverTo ?? existingEm.handoverTo,
+        handoverNotes: validEm.handoverNotes ?? existingEm.handoverNotes,
+        referralCode: validEm.referralCode ?? existingEm.referralCode,
+        version: existingEm.version + 1,
+        lastModified: new Date(),
+      },
+    });
+
+    await prisma.syncAuditLog.create({
+      data: {
+        entityType: 'emergency',
+        entityId: id,
+        operationType: 'UPDATE',
+        payload: validEm,
+        status: 'synced',
+        clientTimestamp: new Date(),
+      },
+    });
+
+    res.json({ success: true, data: updated });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: 'Failed to update emergency incident.' });
   }
 });
 

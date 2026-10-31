@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
+import { resumeAutoSyncAfterAuth, pauseAutoSyncForAuth, requestAutoSync } from '../services/syncService';
 
 export interface UserSession {
   id: string;
@@ -132,6 +133,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           console.warn('[Auth] Could not cache offline credentials:', e);
         }
 
+        // Automatic Background Sync on User Login:
+        resumeAutoSyncAfterAuth();
+        requestAutoSync({ reason: 'user-login', force: true, immediate: true });
+
         return { success: true };
       } catch (err: any) {
         console.warn('[Auth] Network request failed; checking offline credentials cache:', err.message);
@@ -153,6 +158,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             const storage = remember ? localStorage : sessionStorage;
             storage.setItem('ruralcare_auth_session', JSON.stringify(account.session));
             console.log('[Auth] Authenticated in Offline Mode using cryptographically verified cached credentials.');
+
+            resumeAutoSyncAfterAuth();
+            requestAutoSync({ reason: 'user-login-offline' });
+
             return { success: true };
           }
         }
@@ -173,9 +182,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
    * Log out active session:
    * 1. Revoke token on server if reachable.
    * 2. Clear browser session storage.
-   * 3. PRESERVE all pending offline records in Dexie IndexedDB as required.
+   * 3. Pause auto-sync until re-authenticated.
+   * 4. PRESERVE all pending offline records in Dexie IndexedDB as required.
    */
   const logout = () => {
+    pauseAutoSyncForAuth();
+
     if (user?.token && navigator.onLine) {
       fetch(`${API_BASE_URL}/auth/logout`, {
         method: 'POST',

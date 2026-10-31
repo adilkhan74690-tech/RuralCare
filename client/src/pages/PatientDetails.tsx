@@ -11,6 +11,7 @@ import {
 import { BrutalButton } from '../components/ui/BrutalButton';
 import { BrutalBadge } from '../components/ui/BrutalBadge';
 import { Patient, FollowUp } from '../types';
+import { getLocalDateString } from '../utils/dateUtils';
 
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '../services/db';
@@ -47,7 +48,7 @@ export const PatientDetails: React.FC<PatientDetailsProps> = ({
     .sort((a, b) => new Date(b.visitDate).getTime() - new Date(a.visitDate).getTime());
 
   // Upcoming follow-up (earliest upcoming date)
-  const todayStr = new Date().toISOString().split('T')[0];
+  const todayStr = getLocalDateString();
   const upcomingFollowUp = patientFollowUps.find(
     (f) => f.nextFollowUpDate && f.nextFollowUpDate >= todayStr
   );
@@ -81,6 +82,15 @@ export const PatientDetails: React.FC<PatientDetailsProps> = ({
         </button>
 
         <div className="flex items-center gap-2">
+          <Link to={`/app/emergency?patientId=${patient.id}`}>
+            <button
+              className="px-3 py-1.5 rounded-lg border-2 border-black bg-danger hover:bg-danger-hover text-black text-xs font-black shadow-brutal-xs flex items-center gap-1.5 transition-colors"
+              title="Initiate Emergency Assistance for this patient"
+            >
+              <span className="w-2 h-2 rounded-full bg-white animate-ping" />
+              <span>🚨 SOS Emergency</span>
+            </button>
+          </Link>
           <Link to={`/app/follow-ups?patientId=${patient.id}`}>
             <BrutalButton variant="primary" size="sm" icon={<Plus className="w-4 h-4 stroke-[2.5]" />}>
               Record Visit

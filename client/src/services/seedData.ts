@@ -1,4 +1,5 @@
 import { Patient, FollowUp, Task } from '../types';
+import { getLocalDateString } from '../utils/dateUtils';
 
 export const INITIAL_PATIENTS: Patient[] = [
   {
@@ -103,8 +104,9 @@ export const INITIAL_TASKS: Task[] = [
     id: 'task-001-uuid',
     title: 'Routine wellness check for Kamla Devi',
     patientId: 'f81d4fae-7dec-11d0-a765-00a0c91e6bf6',
+    patientDisplayId: 'RC-2026-001',
     patientName: 'Kamla Devi',
-    dueDate: new Date().toISOString().split('T')[0],
+    dueDate: getLocalDateString(),
     priority: 'high',
     completed: false,
     assignedChw: 'Sarah Jenkins',

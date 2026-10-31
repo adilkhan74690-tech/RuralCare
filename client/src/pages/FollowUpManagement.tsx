@@ -11,10 +11,18 @@ import {
   Calendar, 
   Check, 
   User, 
-  ArrowLeft 
+  ArrowLeft,
+  Clock,
+  AlertCircle,
+  Eye,
+  Plus,
+  Play
 } from 'lucide-react';
-import { Patient, FollowUp, FollowUpCategory, FollowUpStatus } from '../types';
+import { Patient, FollowUp, FollowUpCategory, FollowUpStatus, TaskPriority, FieldworkVisitItem } from '../types';
 import { useAuth } from '../context/AuthContext';
+import { getLocalDateString, formatDateDisplay, formatTimeDisplay } from '../utils/dateUtils';
+import { VisitModal } from '../components/VisitModal';
+import { dbService } from '../services/db';
 
 interface FollowUpManagementProps {
   patients: Patient[];
@@ -32,10 +40,13 @@ export const FollowUpManagement: React.FC<FollowUpManagementProps> = ({
   const navigate = useNavigate();
   const preselectedPatientId = searchParams.get('patientId') || '';
 
+  const [mode, setMode] = useState<'SCHEDULE' | 'LOG_COMPLETED'>('SCHEDULE');
   const [selectedPatientId, setSelectedPatientId] = useState(preselectedPatientId);
-  const [visitDate, setVisitDate] = useState(() => new Date().toISOString().split('T')[0]);
+  const [visitDate, setVisitDate] = useState(() => getLocalDateString());
+  const [scheduledTime, setScheduledTime] = useState('10:00');
   const [category, setCategory] = useState<FollowUpCategory>('General check-up');
-  const [status, setStatus] = useState<FollowUpStatus>('completed');
+  const [priority, setPriority] = useState<TaskPriority>('medium');
+  const [status, setStatus] = useState<FollowUpStatus>('scheduled');
   const [observations, setObservations] = useState('');
   const [notes, setNotes] = useState('');
   const [nextFollowUpDate, setNextFollowUpDate] = useState('');
@@ -43,11 +54,24 @@ export const FollowUpManagement: React.FC<FollowUpManagementProps> = ({
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [saveSuccess, setSaveSuccess] = useState(false);
 
+  // Modal inspection state
+  const [inspectingVisit, setInspectingVisit] = useState<FieldworkVisitItem | null>(null);
+  const [isVisitModalOpen, setIsVisitModalOpen] = useState(false);
+  const [logFilter, setLogFilter] = useState<'ALL' | 'SCHEDULED' | 'COMPLETED'>('ALL');
+
   useEffect(() => {
     if (preselectedPatientId && !selectedPatientId) {
       setSelectedPatientId(preselectedPatientId);
     }
   }, [preselectedPatientId]);
+
+  useEffect(() => {
+    if (mode === 'SCHEDULE') {
+      setStatus('scheduled');
+    } else {
+      setStatus('completed');
+    }
+  }, [mode]);
 
   const selectedPatient = patients.find((p) => p.id === selectedPatientId);
 
@@ -59,11 +83,22 @@ export const FollowUpManagement: React.FC<FollowUpManagementProps> = ({
     'Routine follow-up',
   ];
 
+  const priorities: { label: string; value: TaskPriority }[] = [
+    { label: 'Low', value: 'low' },
+    { label: 'Medium', value: 'medium' },
+    { label: 'High', value: 'high' },
+    { label: 'Urgent', value: 'urgent' },
+  ];
+
   const validate = () => {
     const newErrors: Record<string, string> = {};
     if (!selectedPatientId) newErrors.patient = 'Please select a patient';
-    if (!visitDate) newErrors.visitDate = 'Visit date is required';
-    if (!observations.trim()) newErrors.observations = 'Please enter field visit observations';
+    if (!visitDate) newErrors.visitDate = 'Date is required';
+    if (!observations.trim()) {
+      newErrors.observations = mode === 'SCHEDULE' 
+        ? 'Please enter visit purpose or instructions' 
+        : 'Please enter field visit observations';
+    }
     setErrors(newErrors);
     return Object.keys(newErrors).length === 0;
   };
@@ -73,27 +108,45 @@ export const FollowUpManagement: React.FC<FollowUpManagementProps> = ({
     if (!validate()) return;
 
     setIsSubmitting(true);
-    const newFollowUp: FollowUp = {
-      id: uuidv4(),
-      patientId: selectedPatientId,
-      patientDisplayId: selectedPatient ? selectedPatient.patientId : 'RC-FIELD',
-      patientName: selectedPatient ? selectedPatient.fullName : 'Unknown Patient',
-      visitDate,
-      category,
-      observations: observations.trim(),
-      notes: notes.trim(),
-      nextFollowUpDate: nextFollowUpDate || undefined,
-      status,
-      chwName: user?.name || 'Community Health Worker',
-      syncStatus: 'pending',
-      version: 1,
-      lastModified: new Date().toISOString(),
-    };
 
     try {
-      await onAddFollowUp(newFollowUp);
+      if (mode === 'SCHEDULE') {
+        await dbService.scheduleVisit({
+          patientId: selectedPatientId,
+          patientDisplayId: selectedPatient ? selectedPatient.patientId : 'RC-FIELD',
+          patientName: selectedPatient ? selectedPatient.fullName : 'Unknown Patient',
+          visitDate,
+          scheduledTime: scheduledTime ? scheduledTime.trim() : undefined,
+          category,
+          observations: observations.trim(),
+          notes: notes.trim(),
+          priority,
+          chwName: user?.name || 'Sarah Jenkins',
+        });
+      } else {
+        const newFollowUp: FollowUp = {
+          id: uuidv4(),
+          patientId: selectedPatientId,
+          patientDisplayId: selectedPatient ? selectedPatient.patientId : 'RC-FIELD',
+          patientName: selectedPatient ? selectedPatient.fullName : 'Unknown Patient',
+          visitDate,
+          scheduledTime: scheduledTime ? scheduledTime.trim() : undefined,
+          category,
+          observations: observations.trim(),
+          notes: notes.trim(),
+          nextFollowUpDate: nextFollowUpDate || undefined,
+          status,
+          priority,
+          completedAt: new Date().toISOString(),
+          chwName: user?.name || 'Sarah Jenkins',
+          syncStatus: 'pending',
+          version: 1,
+          lastModified: new Date().toISOString(),
+        };
+        await onAddFollowUp(newFollowUp);
+      }
+
       setSaveSuccess(true);
-      // Reset form
       setObservations('');
       setNotes('');
       setNextFollowUpDate('');
@@ -105,16 +158,45 @@ export const FollowUpManagement: React.FC<FollowUpManagementProps> = ({
     }
   };
 
+  const handleOpenVisit = (fu: FollowUp) => {
+    setInspectingVisit({
+      id: fu.id,
+      type: 'visit',
+      followUpId: fu.id,
+      patientId: fu.patientId,
+      patientDisplayId: fu.patientDisplayId,
+      patientName: fu.patientName,
+      title: `${fu.category}: ${fu.patientName}`,
+      category: fu.category,
+      scheduledDate: fu.visitDate,
+      scheduledTime: fu.scheduledTime,
+      purpose: fu.observations,
+      priority: fu.priority || 'medium',
+      status: fu.status === 'completed' ? 'Completed' : fu.status === 'in_progress' ? 'In Progress' : 'Due Today',
+      rawStatus: fu.status,
+      completed: fu.status === 'completed',
+      completedAt: fu.completedAt,
+      followUpRecord: fu,
+    });
+    setIsVisitModalOpen(true);
+  };
+
+  const filteredLogs = followUps.filter((fu) => {
+    if (logFilter === 'SCHEDULED') return fu.status === 'scheduled' || fu.status === 'in_progress';
+    if (logFilter === 'COMPLETED') return fu.status === 'completed';
+    return true;
+  });
+
   return (
     <div className="w-full space-y-6">
       {/* 1. Page Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b-2 border-black">
         <div>
           <h1 className="text-2xl sm:text-3xl font-heading font-black tracking-tight text-black">
-            Record Follow-up Visit
+            Fieldwork & Follow-up Scheduling
           </h1>
           <p className="text-xs sm:text-sm text-neutral-700 font-bold mt-0.5">
-            Log visit details, vital observations, and schedule upcoming rounds
+            Schedule upcoming patient rounds, log conducted visits, and track household care
           </p>
         </div>
 
@@ -127,7 +209,11 @@ export const FollowUpManagement: React.FC<FollowUpManagementProps> = ({
       {saveSuccess && (
         <div className="p-3.5 bg-forest border-2 border-black rounded-xl text-white text-sm font-black flex items-center gap-2.5 shadow-brutal-xs">
           <Check className="w-4 h-4 text-white stroke-[3]" />
-          <span>Visit record saved to this device. It will automatically synchronize when you are online.</span>
+          <span>
+            {mode === 'SCHEDULE' 
+              ? 'Visit scheduled successfully and saved to this device.' 
+              : 'Completed visit record saved to this device. It will synchronize automatically.'}
+          </span>
         </div>
       )}
 
@@ -135,6 +221,32 @@ export const FollowUpManagement: React.FC<FollowUpManagementProps> = ({
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 lg:gap-8">
         {/* Main Form (8 Cols) */}
         <form onSubmit={handleSubmit} className="lg:col-span-8 space-y-5 bg-white p-6 sm:p-8 border-2 border-black rounded-xl shadow-brutal">
+          {/* Mode Switcher: Schedule vs Log Completed */}
+          <div className="p-1.5 bg-cream border-2 border-black rounded-xl flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setMode('SCHEDULE')}
+              className={`flex-1 py-2 px-3 text-xs font-black rounded-lg transition-all ${
+                mode === 'SCHEDULE'
+                  ? 'bg-yellow text-black border-2 border-black shadow-brutal-xs'
+                  : 'bg-transparent text-neutral-700 hover:text-black'
+              }`}
+            >
+              📅 Schedule Upcoming Visit
+            </button>
+            <button
+              type="button"
+              onClick={() => setMode('LOG_COMPLETED')}
+              className={`flex-1 py-2 px-3 text-xs font-black rounded-lg transition-all ${
+                mode === 'LOG_COMPLETED'
+                  ? 'bg-forest text-white border-2 border-black shadow-brutal-xs'
+                  : 'bg-transparent text-neutral-700 hover:text-black'
+              }`}
+            >
+              ✓ Log Completed Visit
+            </button>
+          </div>
+
           {/* Patient Selection */}
           <div>
             <label className="block text-xs font-black uppercase tracking-wider mb-1.5 text-black font-heading">
@@ -145,7 +257,7 @@ export const FollowUpManagement: React.FC<FollowUpManagementProps> = ({
               onChange={(e) => setSelectedPatientId(e.target.value)}
               className={`brutal-input text-sm cursor-pointer ${errors.patient ? '!border-danger' : ''}`}
             >
-              <option value="">-- Choose a registered patient --</option>
+              <option value="">-- Choose a registered patient (Name & ID) --</option>
               {patients.map((p) => (
                 <option key={p.id} value={p.id}>
                   {p.fullName} ({p.patientId}) — {p.village}
@@ -188,11 +300,11 @@ export const FollowUpManagement: React.FC<FollowUpManagementProps> = ({
             </div>
           </div>
 
-          {/* Visit Date & Status */}
+          {/* Date & Time */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
               <label className="block text-xs font-black uppercase tracking-wider mb-1.5 text-black font-heading">
-                Visit Date <span className="text-danger">*</span>
+                {mode === 'SCHEDULE' ? 'Scheduled Date (Local)' : 'Visit Date'} <span className="text-danger">*</span>
               </label>
               <input
                 type="date"
@@ -204,28 +316,52 @@ export const FollowUpManagement: React.FC<FollowUpManagementProps> = ({
 
             <div>
               <label className="block text-xs font-black uppercase tracking-wider mb-1.5 text-black font-heading">
-                Visit Status
+                Scheduled Time (Optional)
               </label>
-              <select
-                value={status}
-                onChange={(e) => setStatus(e.target.value as FollowUpStatus)}
-                className="brutal-input text-sm cursor-pointer"
-              >
-                <option value="completed">Completed (Home visit conducted)</option>
-                <option value="scheduled">Scheduled (Planned visit)</option>
-                <option value="missed">Missed (Patient unavailable)</option>
-              </select>
+              <input
+                type="time"
+                value={scheduledTime}
+                onChange={(e) => setScheduledTime(e.target.value)}
+                className="brutal-input text-sm"
+              />
             </div>
           </div>
 
-          {/* Observations */}
+          {/* Priority */}
           <div>
             <label className="block text-xs font-black uppercase tracking-wider mb-1.5 text-black font-heading">
-              Visit Observations <span className="text-danger">*</span>
+              Priority
+            </label>
+            <div className="grid grid-cols-4 gap-2">
+              {priorities.map((p) => (
+                <button
+                  key={p.value}
+                  type="button"
+                  onClick={() => setPriority(p.value)}
+                  className={`py-1 px-2 text-xs font-black rounded-lg border-2 border-black text-center transition-all ${
+                    priority === p.value
+                      ? 'bg-yellow text-black shadow-brutal-xs font-black'
+                      : 'bg-white text-neutral-600 hover:bg-cream'
+                  }`}
+                >
+                  {p.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Purpose / Observations */}
+          <div>
+            <label className="block text-xs font-black uppercase tracking-wider mb-1.5 text-black font-heading">
+              {mode === 'SCHEDULE' ? 'Visit Purpose / Instructions' : 'Visit Observations'} <span className="text-danger">*</span>
             </label>
             <textarea
               className={`brutal-input min-h-[90px] text-sm resize-y ${errors.observations ? '!border-danger' : ''}`}
-              placeholder="e.g. Patient feeling well. Checked routine adherence and gave dietary guidance."
+              placeholder={
+                mode === 'SCHEDULE'
+                  ? 'e.g. Check routine adherence, verify blood pressure, and inspect nutrition packet delivery...'
+                  : 'e.g. Patient feeling well. Checked routine adherence and gave dietary guidance...'
+              }
               value={observations}
               onChange={(e) => setObservations(e.target.value)}
             />
@@ -233,93 +369,153 @@ export const FollowUpManagement: React.FC<FollowUpManagementProps> = ({
               <p className="text-xs text-danger font-black mt-1">{errors.observations}</p>
             ) : (
               <p className="text-[11px] text-neutral-600 font-bold mt-1">
-                Record basic observations and general follow-up notes.
+                {mode === 'SCHEDULE'
+                  ? 'Clarifies why this visit is scheduled and what actions the CHW should take.'
+                  : 'Record vital signs, observations, and general patient notes.'}
               </p>
             )}
           </div>
 
-          {/* Additional Notes & Next Follow-up */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-1">
-            <div>
-              <label className="block text-xs font-black uppercase tracking-wider mb-1.5 text-black font-heading">
-                Notes for Next Visit (Optional)
-              </label>
-              <input
-                type="text"
-                className="brutal-input text-sm"
-                placeholder="e.g. Bring iron supplement packet"
-                value={notes}
-                onChange={(e) => setNotes(e.target.value)}
-              />
-            </div>
+          {/* Additional Notes & Next Follow-up (if logging completed) */}
+          {mode === 'LOG_COMPLETED' && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-1">
+              <div>
+                <label className="block text-xs font-black uppercase tracking-wider mb-1.5 text-black font-heading">
+                  Action Taken / Outcome Notes
+                </label>
+                <input
+                  type="text"
+                  className="brutal-input text-sm"
+                  placeholder="e.g. Bring iron supplement packet next time"
+                  value={notes}
+                  onChange={(e) => setNotes(e.target.value)}
+                />
+              </div>
 
-            <div>
-              <label className="block text-xs font-black uppercase tracking-wider mb-1.5 text-black font-heading">
-                Next Follow-up Due Date
-              </label>
-              <input
-                type="date"
-                value={nextFollowUpDate}
-                onChange={(e) => setNextFollowUpDate(e.target.value)}
-                className="brutal-input text-sm"
-              />
+              <div>
+                <label className="block text-xs font-black uppercase tracking-wider mb-1.5 text-black font-heading">
+                  Next Follow-up Due Date
+                </label>
+                <input
+                  type="date"
+                  value={nextFollowUpDate}
+                  onChange={(e) => setNextFollowUpDate(e.target.value)}
+                  className="brutal-input text-sm"
+                />
+              </div>
             </div>
-          </div>
+          )}
 
           {/* Submit Actions */}
           <div className="pt-3 border-t-2 border-black flex items-center justify-between">
             <span className="text-xs text-neutral-600 font-bold">
-              Persisted instantly on device.
+              Persisted instantly on device (offline-first).
             </span>
 
             <BrutalButton
               type="submit"
-              variant="primary"
+              variant={mode === 'SCHEDULE' ? 'primary' : 'forest'}
               size="lg"
               disabled={isSubmitting}
-              icon={<ClipboardCheck className="w-4 h-4 stroke-[2.5]" />}
+              icon={mode === 'SCHEDULE' ? <Calendar className="w-4 h-4 stroke-[2.5]" /> : <ClipboardCheck className="w-4 h-4 stroke-[2.5]" />}
             >
-              {isSubmitting ? 'Saving...' : 'Save Visit Record'}
+              {isSubmitting 
+                ? 'Saving...' 
+                : mode === 'SCHEDULE' 
+                  ? 'Schedule Field Visit' 
+                  : 'Save Completed Visit'}
             </BrutalButton>
           </div>
         </form>
 
-        {/* Right Column: Recent Visit Feed (4 Cols) */}
+        {/* Right Column: Visit Feed (4 Cols) */}
         <div className="lg:col-span-4 space-y-4">
-          <div className="pb-2 border-b-2 border-black">
-            <h3 className="text-sm font-heading font-black text-black uppercase tracking-wider">
-              Recent Logs ({followUps.length})
-            </h3>
-            <p className="text-xs text-neutral-600 font-bold">Stored on this device</p>
+          <div className="pb-2 border-b-2 border-black flex items-center justify-between">
+            <div>
+              <h3 className="text-sm font-heading font-black text-black uppercase tracking-wider">
+                Visit Roster ({followUps.length})
+              </h3>
+              <p className="text-xs text-neutral-600 font-bold">Stored on this device</p>
+            </div>
+
+            <div className="flex items-center gap-1">
+              {(['ALL', 'SCHEDULED', 'COMPLETED'] as const).map((filter) => (
+                <button
+                  key={filter}
+                  onClick={() => setLogFilter(filter)}
+                  className={`px-2 py-0.5 text-[10px] font-black rounded border border-black ${
+                    logFilter === filter ? 'bg-yellow text-black' : 'bg-white text-neutral-600'
+                  }`}
+                >
+                  {filter}
+                </button>
+              ))}
+            </div>
           </div>
 
-          {followUps.length === 0 ? (
+          {filteredLogs.length === 0 ? (
             <p className="text-xs text-neutral-600 font-bold py-6 text-center bg-white border-2 border-black rounded-xl shadow-brutal">
-              No visits logged yet.
+              No visits found for filter.
             </p>
           ) : (
-            <div className="space-y-3 max-h-[520px] overflow-y-auto pr-1">
-              {followUps.slice(0, 6).map((fu) => (
-                <div
-                  key={fu.id}
-                  className="p-3.5 bg-white border-2 border-black rounded-xl text-xs space-y-1.5 shadow-brutal-sm hover:translate-x-[-1px] hover:translate-y-[-1px] hover:shadow-brutal transition-all"
-                >
-                  <div className="flex items-center justify-between">
-                    <span className="font-black text-black">{fu.patientName}</span>
-                    <BrutalBadge syncStatus={fu.syncStatus} size="sm" />
+            <div className="space-y-3 max-h-[580px] overflow-y-auto pr-1">
+              {filteredLogs.map((fu) => {
+                const isCompleted = fu.status === 'completed';
+                const isInProgress = fu.status === 'in_progress';
+                return (
+                  <div
+                    key={fu.id}
+                    className="p-3.5 bg-white border-2 border-black rounded-xl text-xs space-y-2 shadow-brutal-sm hover:translate-x-[-1px] hover:translate-y-[-1px] hover:shadow-brutal transition-all"
+                  >
+                    <div className="flex items-center justify-between gap-1">
+                      <div className="flex items-center gap-1.5">
+                        <span className="font-black text-black">{fu.patientName}</span>
+                        <span className="px-1 py-0.2 rounded text-[9px] font-black bg-yellow border border-black text-black">
+                          {fu.patientDisplayId}
+                        </span>
+                      </div>
+                      <BrutalBadge syncStatus={fu.syncStatus} size="sm" />
+                    </div>
+
+                    <div className="flex items-center justify-between gap-1 text-[11px] text-neutral-600 font-bold">
+                      <span>{fu.category} • {formatDateDisplay(fu.visitDate)}</span>
+                      {fu.scheduledTime && <span>{formatTimeDisplay(fu.scheduledTime)}</span>}
+                    </div>
+
+                    <p className="text-black font-medium line-clamp-2">
+                      {fu.observations}
+                    </p>
+
+                    <div className="pt-1 flex items-center justify-between border-t border-black/10">
+                      <span className={`px-2 py-0.5 rounded text-[10px] font-black border border-black ${
+                        isCompleted ? 'bg-forest text-white' : isInProgress ? 'bg-teal text-black' : 'bg-yellow text-black'
+                      }`}>
+                        {isCompleted ? 'Completed' : isInProgress ? 'In Progress' : 'Scheduled'}
+                      </span>
+
+                      <button
+                        onClick={() => handleOpenVisit(fu)}
+                        className="px-2 py-0.5 text-xs font-black rounded border border-black bg-white hover:bg-yellow text-black shadow-brutal-xs flex items-center gap-1"
+                      >
+                        {isCompleted ? <Eye className="w-3 h-3" /> : <Play className="w-3 h-3" />}
+                        <span>{isCompleted ? 'View' : isInProgress ? 'Resume' : 'Start Visit'}</span>
+                      </button>
+                    </div>
                   </div>
-                  <p className="text-neutral-600 font-bold text-[11px]">
-                    {fu.category} • {fu.visitDate}
-                  </p>
-                  <p className="text-black font-medium line-clamp-2">
-                    {fu.observations}
-                  </p>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>
       </div>
+
+      {/* Visit Modal */}
+      <VisitModal
+        isOpen={isVisitModalOpen}
+        onClose={() => setIsVisitModalOpen(false)}
+        visitItem={inspectingVisit}
+        patients={patients}
+      />
     </div>
   );
 };

@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import { Task, TaskPriority, Patient } from '../types';
 import { useAuth } from '../context/AuthContext';
+import { getLocalDateString } from '../utils/dateUtils';
 
 interface TaskManagerProps {
   tasks: Task[];
@@ -35,10 +36,10 @@ export const TaskManager: React.FC<TaskManagerProps> = ({
   // New task form state
   const [title, setTitle] = useState('');
   const [patientId, setPatientId] = useState('');
-  const [dueDate, setDueDate] = useState(() => new Date().toISOString().split('T')[0]);
+  const [dueDate, setDueDate] = useState(() => getLocalDateString());
   const [priority, setPriority] = useState<TaskPriority>('medium');
 
-  const todayStr = new Date().toISOString().split('T')[0];
+  const todayStr = getLocalDateString();
 
   const filteredTasks = tasks.filter((t) => {
     if (filter === 'COMPLETED') return t.completed;
@@ -57,6 +58,7 @@ export const TaskManager: React.FC<TaskManagerProps> = ({
       id: uuidv4(),
       title: title.trim(),
       patientId: patientId || undefined,
+      patientDisplayId: patient ? patient.patientId : undefined,
       patientName: patient ? patient.fullName : undefined,
       dueDate,
       priority,

@@ -8,7 +8,8 @@ import {
   CheckSquare,
   RefreshCw,
   Settings,
-  LogOut
+  LogOut,
+  ShieldAlert
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 
@@ -28,6 +29,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen, onClose, pendingCount 
     { name: 'Register Patient', path: '/app/patients/new', icon: UserPlus },
     { name: 'Follow-ups', path: '/app/follow-ups', icon: ClipboardList },
     { name: 'Field Tasks', path: '/app/tasks', icon: CheckSquare },
+    { name: 'SOS Emergency', path: '/app/emergency', icon: ShieldAlert },
     { 
       name: 'Sync Status', 
       path: '/app/sync', 

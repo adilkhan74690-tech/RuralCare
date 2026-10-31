@@ -9,6 +9,11 @@
     "start": "node dist/server.js",
     "dev": "tsx watch src/server.ts",
     "test": "tsx src/tests/securityVerification.ts",
+    "test:fieldwork": "tsx src/tests/fieldworkWorkflowVerification.ts",
+    "test:reliability": "tsx src/tests/offlineSyncReliabilityVerification.ts",
+    "test:autosync": "tsx src/tests/autoSyncReliabilityVerification.ts",
+    "test:emergency": "tsx src/tests/emergencySystemVerification.ts",
+    "test:all": "tsx src/tests/securityVerification.ts && tsx src/tests/fieldworkWorkflowVerification.ts && tsx src/tests/offlineSyncReliabilityVerification.ts && tsx src/tests/autoSyncReliabilityVerification.ts && tsx src/tests/emergencySystemVerification.ts",
     "prisma:deploy": "prisma migrate deploy",
     "provision:account": "tsx src/scripts/provisionAccount.ts",
     "check:account": "tsx src/scripts/checkAccount.ts"

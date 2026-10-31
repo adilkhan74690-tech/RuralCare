@@ -12,6 +12,7 @@ import { useNetworkStatus } from '../hooks/useNetworkStatus';
 import { useAuth } from '../context/AuthContext';
 import { BrutalButton } from './ui/BrutalButton';
 import { Logo } from './ui/Logo';
+import { NotificationCenter } from './NotificationCenter';
 
 interface NavbarProps {
   onMenuToggle: () => void;
@@ -68,8 +69,19 @@ export const Navbar: React.FC<NavbarProps> = ({
           </Link>
         </div>
 
-        {/* Right Actions: Register Patient (Bold Yellow + Black Text) & CHW Profile */}
-        <div className="flex items-center gap-3">
+        {/* Right Actions: SOS Emergency, Notifications, Register Patient & CHW Profile */}
+        <div className="flex items-center gap-2 sm:gap-2.5">
+          <Link
+            to="/app/emergency"
+            className="flex items-center gap-1.5 px-2.5 sm:px-3 py-1 rounded-md border-2 border-black bg-danger hover:bg-danger-hover text-black text-xs font-black shadow-brutal-xs transition-transform hover:translate-x-[-1px] hover:translate-y-[-1px]"
+            title="SOS Emergency Assistance & Referral Portal"
+          >
+            <span className="w-2 h-2 rounded-full bg-black animate-ping" />
+            <span className="font-heading font-black">🚨 SOS</span>
+          </Link>
+
+          <NotificationCenter />
+
           <Link to="/app/patients/new">
             <BrutalButton
               variant="primary"

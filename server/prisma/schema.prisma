@@ -42,6 +42,7 @@ model Patient {
 
   followUps        FollowUp[]
   tasks            Task[]
+  emergencyIncidents EmergencyIncident[]
 
   @@map("patients")
 }
@@ -99,4 +100,64 @@ model SyncAuditLog {
   createdAt       DateTime  @default(now())
 
   @@map("sync_audit_logs")
+}
+
+model EmergencyIncident {
+  id                      String    @id @default(uuid())
+  incidentCode            String    @unique // e.g. "EMG-2026-001"
+  patientId               String?
+  patient                 Patient?  @relation(fields: [patientId], references: [id], onDelete: SetNull)
+  patientDisplayId        String?
+  patientName             String
+  isUnregistered          Boolean   @default(false)
+  unregisteredPatientAge  Int?
+  unregisteredGender      String?
+  ashaWorkerId            String
+  ashaWorkerName          String
+  incidentTimestamp       DateTime  @default(now())
+  
+  // GPS & Location tracking
+  workerLatitude          Float?
+  workerLongitude         Float?
+  patientLatitude         Float?
+  patientLongitude        Float?
+  locationType            String    @default("same_as_worker") // "same_as_worker" | "different"
+  manualAddress           String?
+  village                 String?
+  landmark                String?
+  
+  // Clinical / Emergency Details
+  category                String    // "Maternal / Obstetric", "Severe Trauma", etc.
+  priority                String    @default("urgent") // "urgent", "critical", "high"
+  chiefComplaints         String?
+  notes                   String    @default("")
+  
+  // Phase 3 Referral Workflow
+  referralStatus          String    @default("initiated") // initiated, facility_selected, transport_arranged, in_transit, arrived, completed, cancelled
+  facilityId              String?
+  facilityName            String?
+  facilityType            String?   // PHC, CHC, District Hospital, Private
+  facilityPhone           String?
+  facilityAddress         String?
+  facilityDistanceKm      Float?
+  
+  contactAttempts         Json?     // Array of contact attempts: [{ timestamp, recipient, outcome, notes }]
+  transportType           String?   // "108 Ambulance", "102 Maternal Ambulance", "Private Vehicle", "PHC Ambulance"
+  transportContact        String?
+  transportNotes          String?
+  dispatchConfirmed       Boolean   @default(false)
+  
+  arrivedAt               DateTime?
+  handoverTo              String?
+  handoverNotes           String?
+  
+  referralCode            String?   // e.g. "REF-2026-94821"
+  
+  // Sync & Versioning
+  syncStatus              String    @default("synced") // synced, pending, failed
+  version                 Int       @default(1)
+  lastModified            DateTime  @updatedAt
+  createdAt               DateTime  @default(now())
+
+  @@map("emergency_incidents")
 }
