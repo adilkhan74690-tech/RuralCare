@@ -44,7 +44,9 @@ const envSchema = z.object({
   }
 );
 
-function validateEnvironment() {
+export type Environment = z.infer<typeof envSchema>;
+
+function validateEnvironment(): Environment {
   const result = envSchema.safeParse(process.env);
 
   if (!result.success) {
@@ -67,10 +69,10 @@ function validateEnvironment() {
     console.error('=============================================================\n');
 
     process.exit(1);
+    throw new Error('Critical configuration error: Environment validation failed.');
   }
 
   return result.data;
 }
 
-export const env = validateEnvironment();
-export type Environment = z.infer<typeof envSchema>;
+export const env: Environment = validateEnvironment();
